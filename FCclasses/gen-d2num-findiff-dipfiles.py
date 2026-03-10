@@ -280,14 +280,16 @@ def extract_eldip_files_using_gen(ref_fchk, disp_pattern, out_dir='', gauge='vel
     out_abs     = os.path.abspath(out_dir) if out_dir else os.path.abspath('.')
     os.makedirs(out_abs, exist_ok=True)
 
-    def _run(fchk_path, eldip_fname, magdip_fname):
+    def _run(fchk_path, eldip_fname, magdip_fname, dest_dir=None):
         # Run gen_fcc_dipfile from the fchk's own directory, passing only the
         # basename as -i so the binary writes output (and the auto-generated
         # P_eldip_* companion for velocity gauge) there without any path issues.
-        # Afterwards, move all produced files to out_abs if it differs.
+        # Afterwards, move all produced files to dest_dir if it differs from fchk_dir.
+        # dest_dir defaults to out_abs; pass fchk_dir explicitly to keep files in place.
         fchk_abs  = os.path.abspath(fchk_path)
         fchk_dir  = os.path.dirname(fchk_abs)
         fchk_base = os.path.basename(fchk_abs)
+        target    = dest_dir if dest_dir is not None else out_abs
         cmd = [gen_cmd, '-i', fchk_base, '-gauge', gauge_str,
                '-oe', eldip_fname, '-om', magdip_fname]
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=fchk_dir)
@@ -295,17 +297,19 @@ def extract_eldip_files_using_gen(ref_fchk, disp_pattern, out_dir='', gauge='vel
             raise RuntimeError(
                 f'{gen_dipfile} failed for {fchk_path}:\n'
                 f'stdout: {result.stdout}\nstderr: {result.stderr}')
-        if fchk_dir != out_abs:
+        if fchk_dir != target:
             for fname in [eldip_fname, magdip_fname, 'P_' + eldip_fname]:
                 src = os.path.join(fchk_dir, fname)
                 if os.path.isfile(src):
-                    os.replace(src, os.path.join(out_abs, fname))
+                    os.replace(src, os.path.join(target, fname))
 
-    # --- Reference geometry ---
+    # --- Reference geometry (keep DIP files next to the reference fchk) ---
     print(f'Reading reference: {ref_fchk}')
     nat      = int(parse_fchk(ref_fchk, 'Number of atoms'))
     ref_stem = os.path.splitext(os.path.basename(ref_fchk))[0]
-    _run(ref_fchk, f'eldip_{ref_stem}_fchk', f'magdip_{ref_stem}_fchk')
+    ref_fchk_dir = os.path.dirname(os.path.abspath(ref_fchk))
+    _run(ref_fchk, f'eldip_{ref_stem}_fchk', f'magdip_{ref_stem}_fchk',
+         dest_dir=ref_fchk_dir)
     print(f'  nat={nat}')
 
     # --- Displaced geometries ---
