@@ -69,6 +69,8 @@ export GAUSS_SCRDIR=$WORK_DIR
 cd "$PBS_O_WORKDIR"
 echo "Current working directory: $PBS_O_WORKDIR"
 
+PROGRESS_LOG="progress_${PBS_JOBID}.log"
+
 # Validate the input file list
 if [ ! -f "$FILE_LIST" ]; then
   echo "Error: File list $FILE_LIST not found."
@@ -87,23 +89,23 @@ run_calculation() {
   local input_file=$1
   local log_file="${input_file%.com}.log"
 
-  echo "Running: $input_file" | tee -a progress.log
+  echo "Running: $input_file" | tee -a "$PROGRESS_LOG"
   g16 "$input_file"
 
   if (( $? != 0 )); then
-    echo "Failed: $input_file (g16 error)" | tee -a progress.log
+    echo "Failed: $input_file (g16 error)" | tee -a "$PROGRESS_LOG"
     return 1
   fi
 
-  echo "Transforming and compressing $input_file..." | tee -a progress.log
+  echo "Transforming and compressing $input_file..." | tee -a "$PROGRESS_LOG"
   formchk -3 "${input_file%.com}.chk" "${input_file%.com}.fchk"
 
   if (( $? == 0 )); then
     rm -f "${input_file%.com}.chk"
     gzip -f "${input_file%.com}.fchk"
-    echo "Completed: $input_file" | tee -a progress.log
+    echo "Completed: $input_file" | tee -a "$PROGRESS_LOG"
   else
-    echo "Failed: $input_file (formchk error, .chk preserved)" | tee -a progress.log
+    echo "Failed: $input_file (formchk error, .chk preserved)" | tee -a "$PROGRESS_LOG"
     return 1
   fi
 }
