@@ -96,8 +96,8 @@ def read_files_list(output_dir, run_cmd):
     return [l for l in content.splitlines() if l.strip()]
 
 
-def parse_progress_log(output_dir, run_cmd):
-    content = run_cmd(["cat", f"{output_dir}/progress.log"])
+def parse_progress_log(output_dir, job_id, run_cmd):
+    content = run_cmd(["cat", f"{output_dir}/progress_{job_id}.log"])
     running, completed, failed = [], [], []
     for line in content.splitlines():
         if line.startswith("Running: "):
@@ -169,13 +169,13 @@ def render_job_block(job_id, run_cmd):
     for f in files_list:
         lines.append(f"    {f}")
 
-    progress = parse_progress_log(out_dir, run_cmd)
+    progress = parse_progress_log(out_dir, job_id, run_cmd)
     completed = progress["completed"]
     failed    = progress["failed"]
     running   = progress["running"]
 
     if not (completed or failed or running):
-        lines.append("\n  [progress.log not found or empty]")
+        lines.append(f"\n  [progress_{job_id}.log not found or empty]")
         return "\n".join(lines)
 
     lines.append(f"\n  Progress: {_progress_bar(len(completed), n_total, len(failed))}")
