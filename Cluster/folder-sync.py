@@ -13,8 +13,9 @@ Required:
     --down / --download Sync remote → local
 
 Options:
-    --dry-run   Show what would be transferred without doing it
-    --delete    Delete files on the destination that are absent on the source
+    -u  / --user    Remote username (default: user already in --host, or SSH config)
+    --dry-run       Show what would be transferred without doing it
+    --delete        Delete files on the destination that are absent on the source
 """
 
 import argparse
@@ -44,6 +45,8 @@ def main():
     )
     parser.add_argument("-H", "--host", required=True, metavar="HOST",
                         help="SSH host (e.g. cluster, or user@hostname)")
+    parser.add_argument("-u", "--user", default=None, metavar="USER",
+                        help="Remote username (overrides any user in --host)")
     parser.add_argument("-ld", "--local-dir", required=True, metavar="LOCAL_DIR",
                         help="Local directory")
     parser.add_argument("-hd", "--host-dir", required=True, metavar="HOST_DIR",
@@ -61,7 +64,11 @@ def main():
                         help="Delete destination files absent from the source")
     args = parser.parse_args()
 
-    remote = f"{args.host}:{args.host_dir}"
+    # Build remote target: if -u given, prepend user@ (stripping any existing user@ from --host)
+    host = args.host.split("@")[-1] if args.user else args.host
+    if args.user:
+        host = f"{args.user}@{host}"
+    remote = f"{host}:{args.host_dir}"
 
     if args.upload:
         print(f"Uploading  {args.local_dir}/ → {remote}/")
