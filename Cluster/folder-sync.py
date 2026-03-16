@@ -13,9 +13,11 @@ Required:
     --down / --download Sync remote → local
 
 Options:
-    -u  / --user    Remote username (default: user already in --host, or SSH config)
-    --dry-run       Show what would be transferred without doing it
-    --delete        Delete files on the destination that are absent on the source
+    -u  / --user        Remote username (default: user already in --host, or SSH config)
+    -e  / --exclude     Exclude pattern (can be used multiple times)
+                        e.g. -e '*.txt' -e 'dir/'
+    --dry-run           Show what would be transferred without doing it
+    --delete            Delete files on the destination that are absent on the source
 """
 
 import argparse
@@ -24,12 +26,14 @@ import subprocess
 import sys
 
 
-def sync(src, dst, *, dry_run=False, delete=False):
+def sync(src, dst, *, dry_run=False, delete=False, exclude=None):
     cmd = ["rsync", "-avz", "--progress"]
     if dry_run:
         cmd.append("--dry-run")
     if delete:
         cmd.append("--delete")
+    for pattern in (exclude or []):
+        cmd += ["--exclude", pattern]
     # Trailing slash on src means "contents of dir", not "dir itself"
     cmd += [src.rstrip("/") + "/", dst.rstrip("/") + "/"]
     print("  $", " ".join(cmd))
@@ -59,6 +63,8 @@ def main():
     direction.add_argument("--down", "--download", dest="upload", action="store_false",
                            help="Download: remote → local")
 
+    parser.add_argument("-e", "--exclude", action="append", default=[], metavar="PATTERN",
+                        help="Exclude pattern, e.g. '*.txt' or 'dir/' (repeatable)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be transferred without doing it")
     parser.add_argument("--delete", action="store_true",
@@ -81,10 +87,10 @@ def main():
 
     if args.upload:
         print(f"Uploading  {args.local_dir}/ → {remote}/")
-        sync(args.local_dir, remote, dry_run=args.dry_run, delete=args.delete)
+        sync(args.local_dir, remote, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude)
     else:
         print(f"Downloading {remote}/ → {args.local_dir}/")
-        sync(remote, args.local_dir, dry_run=args.dry_run, delete=args.delete)
+        sync(remote, args.local_dir, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude)
 
 
 if __name__ == "__main__":
