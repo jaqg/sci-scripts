@@ -19,6 +19,7 @@ Options:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 
@@ -68,7 +69,15 @@ def main():
     host = args.host.split("@")[-1] if args.user else args.host
     if args.user:
         host = f"{args.user}@{host}"
-    remote = f"{host}:{args.host_dir}"
+
+    # If --host-dir was written with ~ but the shell expanded it to the local home,
+    # convert it back so rsync expands it on the remote instead
+    local_home = os.path.expanduser("~")
+    host_dir = args.host_dir
+    if host_dir.startswith(local_home):
+        host_dir = "~" + host_dir[len(local_home):]
+
+    remote = f"{host}:{host_dir}"
 
     if args.upload:
         print(f"Uploading  {args.local_dir}/ → {remote}/")
