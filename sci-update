@@ -1,0 +1,34 @@
+#!/bin/bash
+# Update the sci-scripts repo on a remote host via SSH + git pull.
+
+set -e
+
+REPO_PATH='~/sci-scripts'  # path to the repo on the remote host (~ expanded on the remote)
+
+usage() {
+  echo "Usage: $0 -H HOST [-d REPO_PATH]"
+  echo ""
+  echo "Options:"
+  echo "  -H  SSH host (required)"
+  echo "  -d  Path to the repo on the remote host (default: ~/sci-scripts)"
+  exit 0
+}
+
+SSH_HOST=""
+while getopts "H:d:h" opt; do
+  case $opt in
+    H) SSH_HOST="$OPTARG" ;;
+    d) REPO_PATH="$OPTARG" ;;
+    h) usage ;;
+    *) echo "Run '$0 -h' for usage."; exit 1 ;;
+  esac
+done
+
+if [ -z "$SSH_HOST" ]; then
+  echo "Error: SSH host required (-H HOST)"
+  echo "Run '$0 -h' for usage."
+  exit 1
+fi
+
+echo "Updating sci-scripts on $SSH_HOST:$REPO_PATH ..."
+ssh "$SSH_HOST" "cd $REPO_PATH && git pull"
