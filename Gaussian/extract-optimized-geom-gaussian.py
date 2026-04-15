@@ -11,6 +11,7 @@ and also writes <file.log>.xyz
 
 import sys
 import re
+import argparse
 
 ATOMIC_SYMBOLS = {
     1: 'H',  6: 'C',  7: 'N',  8: 'O',  9: 'F',
@@ -54,11 +55,19 @@ def extract_last_geometry(logfile):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 extract_geom.py <file.log>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Extract the final optimized geometry from a Gaussian log file.",
+        epilog="Outputs the geometry block ready to paste into a new Gaussian .com file,\n"
+               "and also writes <file.log>.xyz",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("logfile", metavar="file.log",
+                        help="Gaussian log file to read")
+    parser.add_argument("-o", "--output", metavar="file.xyz", default=None,
+                        help="output .xyz file (default: <file.log>.xyz)")
+    args = parser.parse_args()
 
-    logfile = sys.argv[1]
+    logfile = args.logfile
     atoms = extract_last_geometry(logfile)
 
     if atoms is None:
@@ -71,7 +80,7 @@ def main():
         print(f"{sym:<3s}  {x:12.6f}  {y:12.6f}  {z:12.6f}")
 
     # Write .xyz file
-    xyzfile = logfile + ".xyz"
+    xyzfile = args.output if args.output else logfile + ".xyz"
     with open(xyzfile, 'w') as f:
         f.write(f"{len(atoms)}\n")
         f.write(f"Optimized geometry from {logfile}\n")
