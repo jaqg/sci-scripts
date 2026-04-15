@@ -18,6 +18,7 @@ Options:
                         e.g. -e '*.txt' -e 'dir/'
     --dry-run           Show what would be transferred without doing it
     --delete            Delete files on the destination that are absent on the source
+    --skip-empty-dirs   Skip empty directories (passes --prune-empty-dirs to rsync)
 """
 
 import argparse
@@ -26,12 +27,14 @@ import subprocess
 import sys
 
 
-def sync(src, dst, *, dry_run=False, delete=False, exclude=None):
+def sync(src, dst, *, dry_run=False, delete=False, exclude=None, skip_empty_dirs=False):
     cmd = ["rsync", "-avz", "--progress"]
     if dry_run:
         cmd.append("--dry-run")
     if delete:
         cmd.append("--delete")
+    if skip_empty_dirs:
+        cmd.append("--prune-empty-dirs")
     for pattern in (exclude or []):
         cmd += ["--exclude", pattern]
     # Trailing slash on src means "contents of dir", not "dir itself"
@@ -69,6 +72,8 @@ def main():
                         help="Show what would be transferred without doing it")
     parser.add_argument("--delete", action="store_true",
                         help="Delete destination files absent from the source")
+    parser.add_argument("--skip-empty-dirs", action="store_true",
+                        help="Skip empty directories (passes --prune-empty-dirs to rsync)")
     args = parser.parse_args()
 
     # Build remote target: if -u given, prepend user@ (stripping any existing user@ from --host)
@@ -87,10 +92,10 @@ def main():
 
     if args.upload:
         print(f"Uploading  {args.local_dir}/ → {remote}/")
-        sync(args.local_dir, remote, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude)
+        sync(args.local_dir, remote, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude, skip_empty_dirs=args.skip_empty_dirs)
     else:
         print(f"Downloading {remote}/ → {args.local_dir}/")
-        sync(remote, args.local_dir, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude)
+        sync(remote, args.local_dir, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude, skip_empty_dirs=args.skip_empty_dirs)
 
 
 if __name__ == "__main__":
