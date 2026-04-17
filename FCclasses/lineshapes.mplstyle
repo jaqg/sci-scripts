@@ -1,0 +1,94 @@
+# Figure properties
+# figure.figsize: 8, 4  # default
+figure.figsize: 5.6, 3   # TCA single-column
+# figure.figsize: 3.33, 2.5  # ACS single-column
+# figure.figsize: 7, 3       # ACS double-column
+# figure.figsize: 3.46, 2.5  # Nature single-column
+figure.autolayout: True
+# figure.titlesize: 14
+figure.titlesize: x-large
+figure.dpi: 300
+
+# Text
+text.color: 323034
+
+# Font properties
+# font.size: 12 % Leaving deafult picks fontsize from .tex file
+# font.family: STIXGeneral
+font.family: serif
+pgf.texsystem: pdflatex
+text.usetex: True
+text.latex.preamble: \usepackage{amsmath}\usepackage{amssymb}\usepackage{siunitx}
+pgf.rcfonts: False
+
+# Math things
+mathtext.fontset: cm
+
+# Axes properties
+axes.labelcolor: black
+axes.edgecolor: black
+axes.linewidth: 0.6
+axes.labelpad: 3
+axes.titlesize: 8
+axes.labelsize: 8
+axes.spines.right: True
+axes.spines.top: True
+axes.grid: False
+axes.titlelocation: center
+axes.formatter.use_mathtext: True
+axes.autolimit_mode: data
+axes.formatter.limits: -4, 4
+axes.xmargin: 0
+axes.ymargin: 0
+# axes.prop_cycle: (cycler(color=['56B4E9', 'E69F00', '009E73', '0072B2', 'D55E00', 'CC79A7', 'F0E442']) + cycler(marker=["o", "^", "s", "v", "o", "s", "^"]))
+axes.prop_cycle: (cycler(color=['56B4E9', 'E69F00', '009E73', '0072B2', 'D55E00', 'CC79A7', 'F0E442']) + cycler(linestyle=["-", "--", "-.", ":", "-", "--", "-."]))
+
+# Tick properties
+# x-axis
+xtick.color: 323034
+xtick.labelsize: 7
+xtick.top: False
+xtick.direction: out
+xtick.major.size: 3
+xtick.major.width: 0.6
+xtick.minor.size: 1
+xtick.minor.width: 0.6
+
+# y-axis
+ytick.color: 323034
+ytick.labelsize: 7
+ytick.right: False
+ytick.direction: out
+ytick.major.size: 3
+ytick.major.width: 0.6
+ytick.minor.size: 1
+ytick.minor.width: 0.6
+
+# Line properties
+# lines.linewidth: 1.5
+lines.linewidth: 1.0
+lines.markersize: 5
+#lines.marker      : None    # the default marker
+lines.markeredgewidth  : 1     # the line width around the marker symbol
+markers.fillstyle: none # full|left|right|bottom|top|none
+
+# Legend properties
+legend.framealpha: 0.8
+legend.frameon: True
+legend.fontsize: 7
+legend.title_fontsize: 7
+legend.edgecolor: 0.8
+legend.borderpad: 0.2
+legend.columnspacing: 1.5
+legend.labelspacing: 0.4
+
+# Patch
+patch.facecolor: bc80bd
+patch.force_edgecolor: True
+patch.linewidth: 0.8
+
+# Scatter
+scatter.edgecolors: face
+
+# Grid
+grid.color: b1afb5
