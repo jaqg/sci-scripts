@@ -19,6 +19,7 @@ font.family: serif
 pgf.texsystem: pdflatex
 text.usetex: True
 text.latex.preamble: \usepackage{amsmath}\usepackage{amssymb}\usepackage{siunitx}
+pgf.preamble: \usepackage{amsmath}\usepackage{amssymb}\usepackage{siunitx}
 pgf.rcfonts: False
 
 # Math things

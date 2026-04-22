@@ -238,8 +238,9 @@ def _generate_script(state: PlotState, records: list) -> str:
         "if handles:",
         "    ax.legend()",
         "",
-        'fig.savefig("snapshot.pdf", bbox_inches="tight")',
-        'print("Saved snapshot.pdf")',
+        '_out = Path(__file__).with_suffix(".pdf")',
+        'fig.savefig(_out, bbox_inches="tight")',
+        'print(f"Saved {_out}")',
     ]
 
     src = "\n".join(lines) + "\n"
