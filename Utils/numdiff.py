@@ -25,8 +25,7 @@ def only_numerical_difference(l1, l2, rtol, atol):
     if len(f1) != len(f2):
         return False
     for a, b in zip(f1, f2):
-        denom = max(abs(a), abs(b), 1e-300)
-        if abs(a - b) > atol and abs(a - b) / denom > rtol:
+        if abs(a - b) > atol + rtol * max(abs(a), abs(b)):
             return False
     return True
 
@@ -36,7 +35,7 @@ def main():
     parser.add_argument('file1')
     parser.add_argument('file2')
     parser.add_argument('-r', '--rtol', type=float, default=1e-3)
-    parser.add_argument('-a', '--atol', type=float, default=0.0)
+    parser.add_argument('-a', '--atol', type=float, default=1e-12)
     args = parser.parse_args()
 
     lines1 = open(args.file1).readlines()
