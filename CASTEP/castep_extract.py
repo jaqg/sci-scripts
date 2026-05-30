@@ -141,6 +141,19 @@ def extract(path: Path) -> dict:
         d["geomopt_n_iterations"] = None
         d["geomopt_final_enthalpy_eV"] = None
 
+    # Iteration-0 energies = energies at the INPUT geometry (before any LBFGS moves).
+    # For DC GeomOpt files: geomopt_iter0_enthalpy_eV = G06 energy at the PBE-optimized
+    # input geometry (not the G06-relaxed final geometry); useful for consistent SP-level
+    # comparisons where zeolite/monomer references are also SP at PBE geometries.
+    # For SP calcs: both fields are None (no LBFGS).
+    iter0_m = re.search(
+        r"LBFGS: finished iteration\s+0\s+with enthalpy=\s*([-\d.E+]+)\s+eV", text
+    )
+    d["geomopt_iter0_enthalpy_eV"] = _float(iter0_m.group(1)) if iter0_m else None
+
+    first_fe = re.search(r"^Final energy\s*=\s*([-\d.E+]+)\s+eV", text, re.MULTILINE)
+    d["geomopt_iter0_final_energy_eV"] = _float(first_fe.group(1)) if first_fe else None
+
     # Last LBFGS convergence table — search the block after the last finished-iteration line
     last_iter_pos = None
     for m in re.finditer(r"LBFGS: finished iteration\s+\d+", text):
