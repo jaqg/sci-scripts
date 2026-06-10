@@ -1017,10 +1017,19 @@ class OrbitalViewer(QMainWindow):
     
     def _start_grid_computation(self, mo_idx, spacing, generation):
         mo_coeffs = self.active_wfn.get_mo(mo_idx)
-        self._grid_worker = GridWorker(self.atoms, self.basis_set, mo_coeffs, spacing, mo_idx)
-        self._grid_worker.finished.connect(
+        worker = GridWorker(self.atoms, self.basis_set, mo_coeffs, spacing, mo_idx)
+        worker.finished.connect(
             lambda gv, o, s, mi: self._on_grid_done(gv, o, s, mi, generation))
-        self._grid_worker.start()
+        worker.finished.connect(lambda *a: self._cleanup_worker(worker))
+        worker.start()
+        self._grid_worker = worker
+    
+    def _cleanup_worker(self, worker):
+        """Called when worker finishes — clean up if it's the current one."""
+        if self._grid_worker is worker:
+            worker.wait(500)  # ensure fully done
+            if worker is self._grid_worker:
+                self._grid_worker = None
     
     def _on_grid_done(self, grid_values, origin, spacing, mo_idx, generation):
         if generation != self._generation or mo_idx != self.active_mo_idx:
@@ -1048,11 +1057,17 @@ class OrbitalViewer(QMainWindow):
         self.orbital_canvas.set_orbital_surface(vp, fp, vn, fn)
     
     def _cancel_current_computation(self):
-        if self._grid_worker is not None and self._grid_worker.isRunning():
-            self._grid_worker.cancel()
-            self._grid_worker.quit()
-            self._grid_worker.wait(1000)
-        self._grid_worker = None
+        if self._grid_worker is not None:
+            if self._grid_worker.isRunning():
+                self._grid_worker.cancel()
+                # Wait up to 3 seconds for the thread to finish.
+                # Don't destroy the QThread while numba kernel is still running.
+                if not self._grid_worker.wait(3000):
+                    # Still running — detach, don't null the reference.
+                    # The generation counter will reject its stale result.
+                    return
+            # Only null the reference if thread is done
+            self._grid_worker = None
     
     # -- Slots --
     
@@ -1097,6 +1112,16 @@ class OrbitalViewer(QMainWindow):
         self._select_orbital(lumo_idx, 'canonical')
         self.gallery_tabs.setCurrentIndex(1)
         self.virtual_list.setCurrentRow(0)
+    
+    def closeEvent(self, event):
+        """Safely shut down worker threads before closing."""
+        if self._grid_worker is not None:
+            if self._grid_worker.isRunning():
+                self._grid_worker.cancel()
+                self._grid_worker.wait(3000)
+            self._grid_worker = None
+        self.orbital_canvas.canvas.close()
+        super().closeEvent(event)
     
     def _file_open(self):
         path, _ = QFileDialog.getOpenFileName(
