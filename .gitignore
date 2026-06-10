@@ -7,6 +7,10 @@ venv/
 *.log
 *.dat
 
+# Project-specific
+Visualization/CONTEXT.md
+TODO-edit/
+
 # IDE
 .idea/
 .vscode/
