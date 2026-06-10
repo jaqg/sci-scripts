@@ -12,7 +12,14 @@ import argparse
 from collections import namedtuple
 from pathlib import Path
 
+import os
 import numpy as np
+
+# Cap CPU threads: leave 2 cores free by default. Set NUMBA_NUM_THREADS to override.
+if 'NUMBA_NUM_THREADS' not in os.environ:
+    cpu_count = os.cpu_count() or 4
+    os.environ['NUMBA_NUM_THREADS'] = str(max(1, cpu_count - 2))
+
 from numba import njit, prange
 
 # ---------------------------------------------------------------------------
