@@ -1,1 +1,16 @@
-TODO-edit
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# GAMESS output (large binary/log files)
+*.log
+*.dat
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
