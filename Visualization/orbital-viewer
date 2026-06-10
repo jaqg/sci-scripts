@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Orbital Visualizer launcher — finds venv relative to this script's location.
+# Works on any machine, any clone path.
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+VENV_PYTHON="$SCRIPT_DIR/venv/bin/python"
+VISUALIZER="$SCRIPT_DIR/orbital-visualizer.py"
+
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "Error: venv not found at $SCRIPT_DIR/venv" >&2
+    echo "Run: cd $SCRIPT_DIR && python3 -m venv venv && source venv/bin/activate && pip install cclib numba vispy scikit-image PyQt6" >&2
+    exit 1
+fi
+
+exec "$VENV_PYTHON" "$VISUALIZER" "$@"
