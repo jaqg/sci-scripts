@@ -6,6 +6,28 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 VENV_PYTHON="$SCRIPT_DIR/venv/bin/python"
 VISUALIZER="$SCRIPT_DIR/orbital-visualizer.py"
 
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    DEF_THREADS=$(( $(nproc) - 2 ))
+    [ "$DEF_THREADS" -lt 1 ] && DEF_THREADS=1
+    echo "Orbital Visualizer — interactive 3D molecular orbital viewer"
+    echo ""
+    echo "Usage:"
+    echo "  orbital-visualizer [file.log]              Launch GUI"
+    echo "  orbital-visualizer --cli file.log ...      Headless render"
+    echo "  orbital-visualizer --help | -h             This help"
+    echo ""
+    echo "Environment variables:"
+    echo "  NUMBA_NUM_THREADS=N    CPU threads for grid computation"
+    echo "                         Default (if unset): max(1, nproc - 2) = $DEF_THREADS on this machine"
+    echo "                         Example: NUMBA_NUM_THREADS=4 orbital-visualizer file.log"
+    echo "  QT_QPA_PLATFORM=xcb    Force X11 backend on Wayland"
+    echo ""
+    echo "CLI examples:"
+    echo "  orbital-visualizer --cli file.log --orbital 27 --output homo.png"
+    echo "  orbital-visualizer --cli --help"
+    exit 0
+fi
+
 if [ ! -f "$VENV_PYTHON" ]; then
     echo "Error: venv not found at $SCRIPT_DIR/venv" >&2
     echo "Run: cd $SCRIPT_DIR && python3 -m venv venv && source venv/bin/activate && pip install cclib numba vispy scikit-image PyQt6" >&2
