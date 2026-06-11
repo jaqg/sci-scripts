@@ -888,17 +888,28 @@ class OrbitalCanvas:
 # Computation worker (QThread)
 # ---------------------------------------------------------------------------
 
-from PyQt6.QtCore import QThread, pyqtSignal
+
+# ---------------------------------------------------------------------------
+# Qt imports (needed by all GUI classes below)
+# ---------------------------------------------------------------------------
+
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QSplitter, QListWidget, QListWidgetItem, QTabWidget,
+    QLabel, QSlider, QPushButton, QFileDialog, QStatusBar,
+    QMessageBox, QApplication
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QAction
 
 
 class GridWorker(QThread):
     """Background thread for MO grid computation."""
     finished = pyqtSignal(object, object, float, int)  # grid_values, origin, spacing, mo_idx
     
-    def __init__(self, atoms, basis_set, mo_coeffs, grid_spacing, mo_idx, parent=None):
+    def __init__(self, session, mo_coeffs, grid_spacing, mo_idx, parent=None):
         super().__init__(parent)
-        self.atoms = atoms
-        self.basis_set = basis_set
+        self.session = session
         self.mo_coeffs = np.asarray(mo_coeffs, dtype=np.float64)
         self.grid_spacing = grid_spacing
         self.mo_idx = mo_idx
@@ -911,7 +922,7 @@ class GridWorker(QThread):
         if self._cancelled:
             return
         grid_values, origin, spacing = eval_mo_on_grid(
-            self.atoms, self.basis_set, self.mo_coeffs,
+            self.session.atoms, self.session.basis_set, self.mo_coeffs,
             grid_spacing=self.grid_spacing
         )
         if not self._cancelled:
@@ -919,61 +930,178 @@ class GridWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
-# Main GUI window
+# Molecule session (one per loaded file)
 # ---------------------------------------------------------------------------
 
-from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QSplitter, QListWidget, QListWidgetItem, QTabWidget,
-    QLabel, QSlider, QPushButton, QFileDialog, QStatusBar,
-    QMessageBox, QApplication
-)
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
-
-
-class OrbitalViewer(QMainWindow):
-    """Main application window."""
-    REFINEMENT_STEPS = [0.35, 0.20, 0.10]
+class MoleculeSession:
+    """Holds all data for one loaded molecule. Owns its basis cache."""
+    __slots__ = ('atoms', 'basis_set', 'canon_wfn', 'local_wfn',
+                 'homo_idx', 'filepath', 'bonds')
     
-    def __init__(self, logpath=None):
-        super().__init__()
-        self.setWindowTitle("Orbital Visualizer")
-        self.resize(1200, 800)
-        
-        # Data
-        self.atoms = None
-        self.basis_set = None
-        self.canon_wfn = None
-        self.local_wfn = None
-        self.homo_idx = 0
-        self.active_wfn = None
-        self.active_mo_idx = -1
+    def __init__(self, atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath):
+        self.atoms = atoms
+        self.basis_set = basis_set
+        self.canon_wfn = canon_wfn
+        self.local_wfn = local_wfn
+        self.homo_idx = homo_idx
+        self.filepath = Path(filepath)
+        self.bonds = detect_bonds(atoms)
+
+
+# ---------------------------------------------------------------------------
+# Viewport widget (one OrbitalCanvas + its orbital state)
+# ---------------------------------------------------------------------------
+
+class ViewportWidget(QWidget):
+    """One 3D viewport showing an orbital. Manages its own grid computation."""
+    clicked = pyqtSignal(object)
+    orbital_changed = pyqtSignal()
+    
+    def __init__(self, session, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.mo_idx = -1
+        self.wtype = 'canonical'
+        self._grid_worker = None
+        self._generation = 0
         self._current_grid_values = None
         self._current_origin = None
         self._current_spacing = None
-        self._grid_worker = None
-        self._refine_step = 0
-        self._generation = 0  # increment on each new orbital request
-        self._isovalue = 0.05
-        self._grid_spacing = 0.35  # coarse by default
-        
+        self._active = False
         self._build_ui()
-        self._build_menu()
-        
-        if logpath is not None:
-            self._load_file(Path(logpath))
     
     def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(4, 4, 4, 4)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.label = QLabel("No orbital")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setStyleSheet("background: #222; color: #aaa; padding: 2px;")
+        self.label.mousePressEvent = lambda e: self.clicked.emit(self)
+        layout.addWidget(self.label)
+        self.canvas = OrbitalCanvas()
+        layout.addWidget(self.canvas.native_widget, 1)
+        if self.session is not None:
+            self.canvas.add_atoms_and_bonds(self.session.atoms, self.session.bonds)
+            self.canvas.set_camera_center(self.session.atoms)
+    
+    @property
+    def active(self):
+        return self._active
+    
+    @active.setter
+    def active(self, val):
+        self._active = val
+        self.setStyleSheet("border: 2px solid #4a9eff;" if val else "border: 2px solid #333;")
+    
+    @property
+    def current_wfn(self):
+        if self.wtype == 'canonical':
+            return self.session.canon_wfn
+        return self.session.local_wfn
+    
+    def set_orbital(self, mo_idx, wtype, isovalue, grid_spacing):
+        wfn = self.session.canon_wfn if wtype == 'canonical' else self.session.local_wfn
+        if wfn is None or mo_idx < 0 or mo_idx >= wfn.nmo:
+            return
+        self.mo_idx = mo_idx
+        self.wtype = wtype
+        self._cancel_computation()
+        self._generation += 1
+        gen = self._generation
+        label = f"MO {mo_idx + 1} ({wfn.labels[mo_idx]})"
+        if wtype == 'canonical' and mo_idx < len(wfn.energies):
+            label += f"  —  {wfn.energies[mo_idx]:+.4f} Eh"
+        self.label.setText(label)
+        self.label.setStyleSheet("background: #222; color: #fff; padding: 2px;")
+        self._start_compute(wfn.get_mo(mo_idx), grid_spacing, gen)
+    
+    def _start_compute(self, mo_coeffs, spacing, generation):
+        self._grid_worker = GridWorker(self.session, mo_coeffs, spacing, self.mo_idx)
+        self._grid_worker.finished.connect(
+            lambda gv, o, s, mi: self._on_grid_done(gv, o, s, mi, generation))
+        self._grid_worker.finished.connect(lambda *a: self._cleanup_worker(self._grid_worker))
+        self._grid_worker.start()
+    
+    def _on_grid_done(self, grid_values, origin, spacing, mo_idx, generation):
+        if generation != self._generation or mo_idx != self.mo_idx:
+            return
+        self._current_grid_values = grid_values
+        self._current_origin = origin
+        self._current_spacing = spacing
+        self.orbital_changed.emit()
+    
+    def update_surface(self, isovalue):
+        if self._current_grid_values is None:
+            return
+        vp, fp, _ = extract_isosurface(self._current_grid_values, +isovalue,
+                                        self._current_origin, self._current_spacing)
+        vn, fn, _ = extract_isosurface(self._current_grid_values, -isovalue,
+                                        self._current_origin, self._current_spacing)
+        self.canvas.set_orbital_surface(vp, fp, vn, fn)
+    
+    def _cancel_computation(self):
+        if self._grid_worker is not None:
+            if self._grid_worker.isRunning():
+                self._grid_worker.cancel()
+                self._grid_worker.wait(3000)
+            self._grid_worker = None
+    
+    def _cleanup_worker(self, worker):
+        if self._grid_worker is worker:
+            worker.wait(500)
+            if self._grid_worker is worker:
+                self._grid_worker = None
+    
+    def shutdown(self):
+        self._cancel_computation()
+        self.canvas.canvas.close()
+    
+    def get_overlay_info(self):
+        lines = []
+        if self.mo_idx >= 0 and self.current_wfn is not None:
+            wfn = self.current_wfn
+            lines.append(f"Orbital {self.mo_idx + 1} ({wfn.labels[self.mo_idx]})")
+            if self.wtype == 'canonical' and self.mo_idx < len(wfn.energies):
+                e = wfn.energies[self.mo_idx]
+                lines.append(f"Energy: {e:+.6f} Eh  ({e * 27.2114:+.2f} eV)")
+        return lines
+
+
+# ---------------------------------------------------------------------------
+# Main GUI window
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Molecule tab (gallery + viewports + controls for one molecule)
+# ---------------------------------------------------------------------------
+
+class MoleculeTab(QWidget):
+    """One tab per loaded molecule. Contains gallery, N viewports, control bar."""
+    REFINEMENT_STEPS = [0.35, 0.20, 0.10]
+    
+    def __init__(self, session, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self._viewports = []
+        self._active_viewport = None
+        self._isovalue = 0.05
+        self._grid_spacing = 0.35
+        self._refining = {}
+        self._refine_generations = {}
         
-        # --- Splitter: gallery | 3D view ---
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._build_ui()
+        self._populate_gallery()
+        self._set_viewport_count(1)
+    
+    def _build_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Left: gallery
+        gallery_panel = QWidget()
+        gallery_layout = QVBoxLayout(gallery_panel)
+        gallery_layout.setContentsMargins(2, 2, 2, 2)
+        
         self.gallery_tabs = QTabWidget()
         self.occupied_list = QListWidget()
         self.occupied_list.currentRowChanged.connect(self._on_occupied_selected)
@@ -983,19 +1111,22 @@ class OrbitalViewer(QMainWindow):
         self.gallery_tabs.addTab(self.virtual_list, "Virtual")
         self.localized_list = QListWidget()
         self.localized_list.currentRowChanged.connect(self._on_localized_selected)
-        splitter.addWidget(self.gallery_tabs)
+        gallery_layout.addWidget(self.gallery_tabs)
         
-        # Right: canvas + controls
-        right_side = QWidget()
-        right_layout = QVBoxLayout(right_side)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.orbital_canvas = OrbitalCanvas()
-        right_layout.addWidget(self.orbital_canvas.native_widget, 1)
         
-        # Control bar
+        self.viewport_container = QWidget()
+        self.viewport_layout = QGridLayout(self.viewport_container)
+        self.viewport_layout.setContentsMargins(0, 0, 0, 0)
+        self.viewport_layout.setSpacing(2)
+        right_layout.addWidget(self.viewport_container, 1)
+        
         ctrl = QWidget()
         ctrl_layout = QHBoxLayout(ctrl)
         ctrl_layout.setContentsMargins(4, 2, 4, 2)
+        
         ctrl_layout.addWidget(QLabel("Isovalue:"))
         self.isovalue_slider = QSlider(Qt.Orientation.Horizontal)
         self.isovalue_slider.setRange(10, 200)
@@ -1005,7 +1136,8 @@ class OrbitalViewer(QMainWindow):
         self.isovalue_label = QLabel("0.050")
         self.isovalue_label.setFixedWidth(40)
         ctrl_layout.addWidget(self.isovalue_label)
-        ctrl_layout.addSpacing(20)
+        
+        ctrl_layout.addSpacing(10)
         ctrl_layout.addWidget(QLabel("Grid:"))
         self.grid_slider = QSlider(Qt.Orientation.Horizontal)
         self.grid_slider.setRange(5, 40)
@@ -1015,32 +1147,192 @@ class OrbitalViewer(QMainWindow):
         self.grid_label = QLabel("0.35 Å")
         self.grid_label.setFixedWidth(50)
         ctrl_layout.addWidget(self.grid_label)
-
-        # Grid quality preset buttons
-        self.btn_coarse = QPushButton("Coarse")
-        self.btn_coarse.clicked.connect(lambda: self._set_grid_preset(0.35, 35))
-        ctrl_layout.addWidget(self.btn_coarse)
-        self.btn_medium = QPushButton("Medium")
-        self.btn_medium.clicked.connect(lambda: self._set_grid_preset(0.20, 20))
-        ctrl_layout.addWidget(self.btn_medium)
-        self.btn_fine = QPushButton("Fine")
-        self.btn_fine.clicked.connect(lambda: self._set_grid_preset(0.10, 10))
-        ctrl_layout.addWidget(self.btn_fine)
-
+        
+        for label, sp, sv in [("Coarse", 0.35, 35), ("Medium", 0.20, 20), ("Fine", 0.10, 10)]:
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda checked, s=sp, v=sv: self._set_grid_preset(s, v))
+            ctrl_layout.addWidget(btn)
+        
         ctrl_layout.addStretch()
+        
+        self.split_btn = QPushButton("Split ▸")
+        self.split_btn.clicked.connect(self._toggle_split)
+        ctrl_layout.addWidget(self.split_btn)
+        
         self.homo_btn = QPushButton("HOMO")
         self.homo_btn.clicked.connect(self._go_to_homo)
         ctrl_layout.addWidget(self.homo_btn)
         self.lumo_btn = QPushButton("LUMO")
         self.lumo_btn.clicked.connect(self._go_to_lumo)
         ctrl_layout.addWidget(self.lumo_btn)
+        
         right_layout.addWidget(ctrl)
         
-        splitter.addWidget(right_side)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(gallery_panel)
+        splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([250, 950])
+        splitter.setSizes([220, 980])
         main_layout.addWidget(splitter)
+    
+    def _populate_gallery(self):
+        wfn = self.session.canon_wfn
+        if wfn is None:
+            return
+        self.occupied_list.clear()
+        for i in range(self.session.homo_idx + 1):
+            e = wfn.energies[i]
+            item = QListWidgetItem(f"MO {i+1}  ({e:+.3f} Eh)")
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.occupied_list.addItem(item)
+        self.virtual_list.clear()
+        for i in range(self.session.homo_idx + 1, wfn.nmo):
+            e = wfn.energies[i]
+            item = QListWidgetItem(f"MO {i+1}  ({e:+.3f} Eh)")
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.virtual_list.addItem(item)
+        if self.session.local_wfn is not None:
+            self.localized_list.clear()
+            for i in range(self.session.local_wfn.nmo):
+                item = QListWidgetItem(f"Loc {i+1}")
+                item.setData(Qt.ItemDataRole.UserRole, i)
+                self.localized_list.addItem(item)
+            self.gallery_tabs.addTab(self.localized_list, "Localized")
+    
+    def _set_viewport_count(self, n):
+        for vp in self._viewports:
+            vp.shutdown()
+            vp.setParent(None)
+        self._viewports = []
+        self._refining = {}
+        self._refine_generations = {}
+        
+        while self.viewport_layout.count():
+            item = self.viewport_layout.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+        
+        for i in range(n):
+            vp = ViewportWidget(self.session)
+            vp.clicked.connect(lambda v=vp: self._activate_viewport(v))
+            vp.orbital_changed.connect(lambda v=vp: self._on_viewport_updated(v))
+            self._viewports.append(vp)
+        
+        if n == 1:
+            self.viewport_layout.addWidget(self._viewports[0], 0, 0)
+        elif n == 2:
+            self.viewport_layout.addWidget(self._viewports[0], 0, 0)
+            self.viewport_layout.addWidget(self._viewports[1], 0, 1)
+        
+        self._activate_viewport(self._viewports[-1])
+        self.split_btn.setText("Split ▸" if n == 1 else "Unsplit ◂")
+    
+    def _toggle_split(self):
+        n = 2 if len(self._viewports) == 1 else 1
+        self._set_viewport_count(n)
+    
+    def _activate_viewport(self, vp):
+        for v in self._viewports:
+            v.active = (v is vp)
+        self._active_viewport = vp
+    
+    def _on_viewport_updated(self, vp):
+        vp.update_surface(self._isovalue)
+        step = self._refining.get(id(vp), 0)
+        if step < len(self.REFINEMENT_STEPS):
+            next_sp = max(self.REFINEMENT_STEPS[step], self._grid_spacing)
+            if vp._current_spacing is not None and next_sp < vp._current_spacing:
+                self._refining[id(vp)] = step + 1
+                gen = self._refine_generations.get(id(vp), 0) + 1
+                self._refine_generations[id(vp)] = gen
+                vp._start_compute(vp.current_wfn.get_mo(vp.mo_idx), next_sp, gen)
+                return
+        self._refining[id(vp)] = 999
+    
+    def _assign_orbital_to_active(self, mo_idx, wtype='canonical'):
+        if self._active_viewport is None:
+            return
+        self._refining[id(self._active_viewport)] = 0
+        self._refine_generations[id(self._active_viewport)] = 0
+        self._active_viewport.set_orbital(mo_idx, wtype, self._isovalue, self.REFINEMENT_STEPS[0])
+    
+    def _on_occupied_selected(self, row):
+        if row < 0: return
+        self._assign_orbital_to_active(self.occupied_list.item(row).data(Qt.ItemDataRole.UserRole), 'canonical')
+    
+    def _on_virtual_selected(self, row):
+        if row < 0: return
+        self._assign_orbital_to_active(self.virtual_list.item(row).data(Qt.ItemDataRole.UserRole), 'canonical')
+    
+    def _on_localized_selected(self, row):
+        if row < 0: return
+        self._assign_orbital_to_active(self.localized_list.item(row).data(Qt.ItemDataRole.UserRole), 'localized')
+    
+    def _on_isovalue_changed(self, value):
+        self._isovalue = value / 1000.0
+        self.isovalue_label.setText(f"{self._isovalue:.3f}")
+        for vp in self._viewports:
+            if vp._current_grid_values is not None:
+                vp.update_surface(self._isovalue)
+    
+    def _on_grid_changed(self, value):
+        self._grid_spacing = value / 100.0
+        self.grid_label.setText(f"{self._grid_spacing:.2f} Å")
+        for vp in self._viewports:
+            if vp.mo_idx >= 0:
+                self._refining[id(vp)] = 0
+                self._refine_generations[id(vp)] = 0
+                vp._cancel_computation()
+                vp._generation += 1
+                vp._start_compute(vp.current_wfn.get_mo(vp.mo_idx), self._grid_spacing, vp._generation)
+    
+    def _set_grid_preset(self, spacing, slider_value):
+        self.grid_slider.setValue(slider_value)
+    
+    def _go_to_homo(self):
+        self.gallery_tabs.setCurrentIndex(0)
+        self.occupied_list.setCurrentRow(self.session.homo_idx)
+    
+    def _go_to_lumo(self):
+        self.gallery_tabs.setCurrentIndex(1)
+        self.virtual_list.setCurrentRow(0)
+    
+    def shutdown(self):
+        for vp in self._viewports:
+            vp.shutdown()
+
+# ---------------------------------------------------------------------------
+# Main GUI window (manages tabs)
+# ---------------------------------------------------------------------------
+
+
+class OrbitalViewer(QMainWindow):
+    """Main application window with tabbed molecules and split viewports."""
+    
+    def __init__(self, logpath=None):
+        super().__init__()
+        self.setWindowTitle("Orbital Visualizer")
+        self.resize(1200, 800)
+        self._sessions = []
+        
+        self._build_ui()
+        self._build_menu()
+        
+        if logpath is not None:
+            self._open_file(Path(logpath))
+    
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(4, 4, 4, 4)
+        
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.tabCloseRequested.connect(self._close_tab)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self.tab_widget)
         
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -1050,12 +1342,20 @@ class OrbitalViewer(QMainWindow):
         mb = self.menuBar()
         fm = mb.addMenu("&File")
         a = QAction("&Open...", self); a.setShortcut("Ctrl+O"); a.triggered.connect(self._file_open); fm.addAction(a)
+        a = QAction("&New Tab", self); a.setShortcut("Ctrl+T"); a.triggered.connect(lambda: self._file_open()); fm.addAction(a)
         fm.addSeparator()
         a = QAction("&Export Image...", self); a.setShortcut("Ctrl+E"); a.triggered.connect(self._file_export); fm.addAction(a)
         fm.addSeparator()
+        a = QAction("&Close Tab", self); a.setShortcut("Ctrl+W"); a.triggered.connect(lambda: self._close_tab(self.tab_widget.currentIndex())); fm.addAction(a)
         a = QAction("&Quit", self); a.setShortcut("Ctrl+Q"); a.triggered.connect(self.close); fm.addAction(a)
     
-    def _load_file(self, logpath):
+    def _file_open(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open GAMESS Log", "", "GAMESS Log Files (*.log *.out);;All Files (*)")
+        if path:
+            self._open_file(Path(path))
+    
+    def _open_file(self, logpath):
         self.status_bar.showMessage(f"Loading {logpath.name} ...")
         QApplication.processEvents()
         try:
@@ -1064,193 +1364,32 @@ class OrbitalViewer(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to parse file:\n{e}")
             self.status_bar.showMessage("Error loading file")
             return
-
-        # Clear basis cache — new molecule, new basis set
-        clear_basis_cache()
-
-        self.atoms = atoms
-        self.basis_set = basis_set
-        self.canon_wfn = canon_wfn
-        self.local_wfn = local_wfn
-        self.homo_idx = homo_idx
-        self.setWindowTitle(f"Orbital Visualizer — {logpath.name}")
         
-        bonds = detect_bonds(atoms)
-        self.orbital_canvas.add_atoms_and_bonds(atoms, bonds)
-        self.orbital_canvas.set_camera_center(atoms)
-        self._populate_gallery()
+        clear_basis_cache()
+        session = MoleculeSession(atoms, basis_set, canon_wfn, local_wfn, homo_idx, logpath)
+        self._sessions.append(session)
+        
+        tab = MoleculeTab(session)
+        idx = self.tab_widget.addTab(tab, logpath.name)
+        self.tab_widget.setCurrentIndex(idx)
+        
         self.status_bar.showMessage(
             f"Loaded: {len(atoms)} atoms, {basis_set.nbasis} bf, "
             f"{canon_wfn.nmo} MOs, HOMO={homo_idx + 1}")
     
-    def _populate_gallery(self):
-        wfn = self.canon_wfn
-        if wfn is None:
+    def _close_tab(self, index):
+        if index < 0 or index >= len(self._sessions):
             return
-        self.occupied_list.clear()
-        for i in range(self.homo_idx + 1):
-            e = wfn.energies[i]
-            item = QListWidgetItem(f"MO {i+1}  ({e:+.3f} Eh)")
-            item.setData(Qt.ItemDataRole.UserRole, i)
-            self.occupied_list.addItem(item)
-        self.virtual_list.clear()
-        for i in range(self.homo_idx + 1, wfn.nmo):
-            e = wfn.energies[i]
-            item = QListWidgetItem(f"MO {i+1}  ({e:+.3f} Eh)")
-            item.setData(Qt.ItemDataRole.UserRole, i)
-            self.virtual_list.addItem(item)
-        # Remove localized tab if it exists (from previous load)
-        for t in range(self.gallery_tabs.count()):
-            if self.gallery_tabs.tabText(t) == "Localized":
-                self.gallery_tabs.removeTab(t)
-                break
-        if self.local_wfn is not None:
-            self.localized_list.clear()
-            for i in range(self.local_wfn.nmo):
-                item = QListWidgetItem(f"Loc {i+1}")
-                item.setData(Qt.ItemDataRole.UserRole, i)
-                self.localized_list.addItem(item)
-            self.gallery_tabs.addTab(self.localized_list, "Localized")
+        tab = self.tab_widget.widget(index)
+        if hasattr(tab, 'shutdown'):
+            tab.shutdown()
+        self.tab_widget.removeTab(index)
+        del self._sessions[index]
     
-    # -- Orbital selection --
-    
-    def _select_orbital(self, mo_idx, wtype='canonical'):
-        if self.atoms is None:
-            return
-        self._cancel_current_computation()
-        self._generation += 1
-        gen = self._generation
-        wfn = self.canon_wfn if wtype == 'canonical' else self.local_wfn
-        if wfn is None or mo_idx < 0 or mo_idx >= wfn.nmo:
-            return
-        self.active_wfn = wfn
-        self.active_mo_idx = mo_idx
-        self._refine_step = 0
-        self.status_bar.showMessage(f"Computing MO {mo_idx+1} ({wfn.labels[mo_idx]}) ...")
-        # Start coarse first
-        self._start_grid_computation(mo_idx, self.REFINEMENT_STEPS[0], gen)
-    
-    def _start_grid_computation(self, mo_idx, spacing, generation):
-        mo_coeffs = self.active_wfn.get_mo(mo_idx)
-        worker = GridWorker(self.atoms, self.basis_set, mo_coeffs, spacing, mo_idx)
-        worker.finished.connect(
-            lambda gv, o, s, mi: self._on_grid_done(gv, o, s, mi, generation))
-        worker.finished.connect(lambda *a: self._cleanup_worker(worker))
-        worker.start()
-        self._grid_worker = worker
-    
-    def _cleanup_worker(self, worker):
-        """Called when worker finishes — clean up if it's the current one."""
-        if self._grid_worker is worker:
-            worker.wait(500)  # ensure fully done
-            if worker is self._grid_worker:
-                self._grid_worker = None
-    
-    def _on_grid_done(self, grid_values, origin, spacing, mo_idx, generation):
-        if generation != self._generation or mo_idx != self.active_mo_idx:
-            return
-        self._current_grid_values = grid_values
-        self._current_origin = origin
-        self._current_spacing = spacing
-        self._update_surface()
-        self._refine_step += 1
-        if self._refine_step < len(self.REFINEMENT_STEPS):
-            next_sp = max(self.REFINEMENT_STEPS[self._refine_step], self._grid_spacing)
-            if next_sp < spacing:
-                self.status_bar.showMessage(f"Refining MO {mo_idx+1} ({spacing:.2f}→{next_sp:.2f} Å) ...")
-                self._start_grid_computation(mo_idx, next_sp, generation)
-                return
-        self.status_bar.showMessage(f"MO {mo_idx+1} ready ({spacing:.2f} Å grid)")
-    
-    def _update_surface(self):
-        if self._current_grid_values is None:
-            return
-        vp, fp, _ = extract_isosurface(self._current_grid_values, +self._isovalue,
-                                        self._current_origin, self._current_spacing)
-        vn, fn, _ = extract_isosurface(self._current_grid_values, -self._isovalue,
-                                        self._current_origin, self._current_spacing)
-        self.orbital_canvas.set_orbital_surface(vp, fp, vn, fn)
-    
-    def _cancel_current_computation(self):
-        if self._grid_worker is not None:
-            if self._grid_worker.isRunning():
-                self._grid_worker.cancel()
-                # Wait up to 3 seconds for the thread to finish.
-                # Don't destroy the QThread while numba kernel is still running.
-                if not self._grid_worker.wait(3000):
-                    # Still running — detach, don't null the reference.
-                    # The generation counter will reject its stale result.
-                    return
-            # Only null the reference if thread is done
-            self._grid_worker = None
-    
-    # -- Slots --
-    
-    def _on_occupied_selected(self, row):
-        if row < 0: return
-        mo_idx = self.occupied_list.item(row).data(Qt.ItemDataRole.UserRole)
-        self._select_orbital(mo_idx, 'canonical')
-    
-    def _on_virtual_selected(self, row):
-        if row < 0: return
-        mo_idx = self.virtual_list.item(row).data(Qt.ItemDataRole.UserRole)
-        self._select_orbital(mo_idx, 'canonical')
-    
-    def _on_localized_selected(self, row):
-        if row < 0: return
-        mo_idx = self.localized_list.item(row).data(Qt.ItemDataRole.UserRole)
-        self._select_orbital(mo_idx, 'localized')
-    
-    def _on_isovalue_changed(self, value):
-        self._isovalue = value / 1000.0
-        self.isovalue_label.setText(f"{self._isovalue:.3f}")
-        if self._current_grid_values is not None:
-            self._update_surface()
-    
-    def _on_grid_changed(self, value):
-        self._grid_spacing = value / 100.0
-        self.grid_label.setText(f"{self._grid_spacing:.2f} Å")
-        if self.active_mo_idx >= 0:
-            self._cancel_current_computation()
-            self._generation += 1
-            gen = self._generation
-            self._refine_step = 0
-            self._start_grid_computation(self.active_mo_idx, self._grid_spacing, gen)
-
-    def _set_grid_preset(self, spacing, slider_value):
-        """Set grid to a preset quality (Coarse/Medium/Fine)."""
-        self.grid_slider.setValue(slider_value)
-        # Slider valueChanged will trigger _on_grid_changed
-    
-    def _go_to_homo(self):
-        self._select_orbital(self.homo_idx, 'canonical')
-        self.gallery_tabs.setCurrentIndex(0)
-        self.occupied_list.setCurrentRow(self.homo_idx)
-    
-    def _go_to_lumo(self):
-        lumo_idx = self.homo_idx + 1
-        self._select_orbital(lumo_idx, 'canonical')
-        self.gallery_tabs.setCurrentIndex(1)
-        self.virtual_list.setCurrentRow(0)
-    
-    def closeEvent(self, event):
-        """Safely shut down worker threads before closing."""
-        if self._grid_worker is not None:
-            if self._grid_worker.isRunning():
-                self._grid_worker.cancel()
-                self._grid_worker.wait(3000)
-            self._grid_worker = None
-        self.orbital_canvas.canvas.close()
-        super().closeEvent(event)
-    
-    def _file_open(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open GAMESS Log", "", "GAMESS Log Files (*.log *.out);;All Files (*)")
-        if path:
-            self._cancel_current_computation()
-            self.orbital_canvas.clear_all()
-            self._current_grid_values = None
-            self._load_file(Path(path))
+    def _on_tab_changed(self, index):
+        if index >= 0 and index < len(self._sessions):
+            session = self._sessions[index]
+            self.setWindowTitle(f"Orbital Visualizer — {session.filepath.name}")
     
     def _file_export(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -1258,64 +1397,62 @@ class OrbitalViewer(QMainWindow):
         if path:
             self._export_with_overlay(path)
             self.status_bar.showMessage(f"Saved: {path}")
-
+    
     def _export_with_overlay(self, path):
-        """Render viewport and overlay orbital info, then save to PNG."""
         from PyQt6.QtGui import QImage, QPainter, QColor, QFont
-
-        # Get vispy render
-        img_array = self.orbital_canvas.canvas.render()
+        
+        tab = self.tab_widget.currentWidget()
+        if tab is None or not hasattr(tab, '_active_viewport'):
+            return
+        vp = tab._active_viewport
+        if vp is None:
+            return
+        
+        img_array = vp.canvas.canvas.render()
         h, w = img_array.shape[:2]
-
-        # Convert to QImage (RGBA8888)
         img_8bit = (np.clip(img_array, 0, 1) * 255).astype(np.uint8)
         qimg = QImage(img_8bit.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
-
-        # Build overlay text
-        lines = []
-        if self.active_mo_idx >= 0 and self.active_wfn is not None:
-            label = self.active_wfn.labels[self.active_mo_idx]
-            lines.append(f"Orbital {self.active_mo_idx + 1} ({label})")
-            if self.active_wfn is self.canon_wfn and self.active_mo_idx < len(self.active_wfn.energies):
-                e = self.active_wfn.energies[self.active_mo_idx]
-                lines.append(f"Energy: {e:+.6f} Eh  ({e * 27.2114:+.2f} eV)")
-            lines.append(f"Isovalue: ±{self._isovalue:.3f}")
-        if self._current_spacing is not None:
-            lines.append(f"Grid: {self._current_spacing:.2f} Å")
-
+        
+        lines = vp.get_overlay_info()
+        lines.append(f"Isovalue: ±{tab._isovalue:.3f}")
+        if vp._current_spacing is not None:
+            lines.append(f"Grid: {vp._current_spacing:.2f} Å")
+        if self._sessions:
+            s = self._sessions[self.tab_widget.currentIndex()]
+            lines.insert(0, f"{s.filepath.name}")
+        
         if not lines:
             qimg.save(path, 'PNG')
             return
-
-        # Draw overlay text
+        
         painter = QPainter(qimg)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
         font = QFont("monospace", 12)
         font.setBold(True)
         painter.setFont(font)
-
-        # Semi-transparent background for readability
-        padding = 8
-        line_height = 20
-        box_height = len(lines) * line_height + padding * 2
-        box_width = 0
+        
+        pad = 8
+        lh = 20
+        bh = len(lines) * lh + pad * 2
         metrics = painter.fontMetrics()
-        for line in lines:
-            box_width = max(box_width, metrics.horizontalAdvance(line))
-        box_width += padding * 2
-
-        # Draw background box (top-left)
-        painter.fillRect(0, 0, box_width, box_height, QColor(0, 0, 0, 180))
+        bw = max(metrics.horizontalAdvance(l) for l in lines) + pad * 2
+        
+        painter.fillRect(0, 0, bw, bh, QColor(0, 0, 0, 180))
         painter.setPen(QColor(255, 255, 255, 255))
-
-        y = padding + metrics.ascent()
+        y = pad + metrics.ascent()
         for line in lines:
-            painter.drawText(padding, y, line)
-            y += line_height
-
+            painter.drawText(pad, y, line)
+            y += lh
         painter.end()
         qimg.save(path, 'PNG')
+    
+    def closeEvent(self, event):
+        for i in range(self.tab_widget.count()):
+            tab = self.tab_widget.widget(i)
+            if hasattr(tab, 'shutdown'):
+                tab.shutdown()
+        super().closeEvent(event)
+
 
 
 # ---------------------------------------------------------------------------
