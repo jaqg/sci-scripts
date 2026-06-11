@@ -109,42 +109,48 @@ class BasisSet:
     
     def flatten_primitives(self):
         """Return flat arrays for primitive data.
-        
+
         Returns:
-            shell_prim_start: (nshells+1,) int32 — start index in prim arrays for each shell
-            shell_L: (nshells,) int32 — total angular momentum L for each shell
-            prim_exp: (nprims,) float64 — primitive exponents
-            prim_coeff: (nprims,) float64 — primitive contraction coefficients
-            prim_radial_norm: (nprims,) float64 — precomputed radial norm: (2α/π)^(3/4) * sqrt((8α)^L)
+            shell_prim_start: (nshells+1,) int32
+            shell_L: (nshells,) int32
+            shell_cutoff_r2: (nshells,) float64 — max cutoff distance² across primitives in shell
+            prim_exp: (nprims,) float64
+            prim_coeff: (nprims,) float64
+            prim_radial_norm: (nprims,) float64
         """
+        CUTOFF_THRESHOLD = 1e-12
         nprims_total = sum(len(shell.primitives) for shell in self.shells)
-        shell_prim_start = np.zeros(len(self.shells) + 1, dtype=np.int32)
-        shell_L = np.zeros(len(self.shells), dtype=np.int32)
+        nshells = len(self.shells)
+        shell_prim_start = np.zeros(nshells + 1, dtype=np.int32)
+        shell_L = np.zeros(nshells, dtype=np.int32)
+        shell_cutoff_r2 = np.zeros(nshells, dtype=np.float64)
         prim_exp = np.zeros(nprims_total, dtype=np.float64)
         prim_coeff = np.zeros(nprims_total, dtype=np.float64)
         prim_radial_norm = np.zeros(nprims_total, dtype=np.float64)
-        
+
         idx = 0
         for sidx, shell in enumerate(self.shells):
             shell_prim_start[sidx] = idx
-            # Total angular momentum L = lx+ly+lz for all functions in this Cartesian shell
-            # All Cartesian functions in a shell have the same total L
             lmn_list = self.CARTESIAN_MAP.get(shell.ang_mom, [(0, 0, 0)])
-            L = sum(lmn_list[0])  # lx+ly+lz
+            L = sum(lmn_list[0])
             shell_L[sidx] = L
-            
+
+            # Spatial cutoff: find most diffuse primitive (smallest alpha)
+            alpha_min = min(alpha for alpha, _ in shell.primitives)
+            cutoff_r = math.sqrt(-math.log(CUTOFF_THRESHOLD) / alpha_min)
+            shell_cutoff_r2[sidx] = cutoff_r * cutoff_r
+
             for alpha, coeff in shell.primitives:
                 prim_exp[idx] = alpha
                 prim_coeff[idx] = coeff
-                # Radial normalization: (2α/π)^(3/4) * sqrt((8α)^L)
                 radial = (2.0 * alpha / math.pi) ** 0.75
                 if L > 0:
                     radial *= math.sqrt((8.0 * alpha) ** L)
                 prim_radial_norm[idx] = radial
                 idx += 1
-        
+
         shell_prim_start[-1] = idx
-        return shell_prim_start, shell_L, prim_exp, prim_coeff, prim_radial_norm
+        return shell_prim_start, shell_L, shell_cutoff_r2, prim_exp, prim_coeff, prim_radial_norm
 
 
 class Wavefunction:
@@ -414,129 +420,149 @@ BOND_CUTOFF_FACTOR = 1.2
 @njit(parallel=True)
 def _eval_mo_kernel(grid_points, atom_centers, basis_atom_idx, basis_shell_idx,
                     basis_lx, basis_ly, basis_lz, angular_norms,
-                    shell_prim_start, shell_L, prim_exp, prim_coeff, prim_radial_norm,
+                    shell_prim_start, shell_L, shell_cutoff_r2,
+                    prim_exp, prim_coeff, prim_radial_norm,
                     mo_coeffs, out_values):
-    """Numba JIT kernel: evaluate MO on all grid points.
-    
-    Parameters
-    ----------
-    grid_points : (N, 3) float64
-    atom_centers : (natom, 3) float64
-    basis_atom_idx : (nbasis,) int32
-    basis_shell_idx : (nbasis,) int32
-    basis_lx, basis_ly, basis_lz : (nbasis,) int32
-    angular_norms : (nbasis,) float64
-    shell_prim_start : (nshells+1,) int32
-    shell_L : (nshells,) int32
-    prim_exp : (nprims,) float64
-    prim_coeff : (nprims,) float64
-    prim_radial_norm : (nprims,) float64
-    mo_coeffs : (nbasis,) float64
-    out_values : (N,) float64 (output)
-    """
+    """Evaluate one MO on all grid points with spatial cutoff."""
     nbasis = basis_atom_idx.shape[0]
     npoints = grid_points.shape[0]
-    
+
     for p_idx in prange(npoints):
         x = grid_points[p_idx, 0]
         y = grid_points[p_idx, 1]
         z = grid_points[p_idx, 2]
-        
         total = 0.0
-        
+
         for bf_idx in range(nbasis):
             aidx = basis_atom_idx[bf_idx]
             ax = atom_centers[aidx, 0]
             ay = atom_centers[aidx, 1]
             az = atom_centers[aidx, 2]
-            
             rx = x - ax
             ry = y - ay
             rz = z - az
             r2 = rx * rx + ry * ry + rz * rz
-            
-            # Evaluate contracted basis function
+
+            # Spatial cutoff: skip if grid point is beyond shell's cutoff radius
             sidx = basis_shell_idx[bf_idx]
+            if r2 > shell_cutoff_r2[sidx]:
+                continue
+
             p_start = shell_prim_start[sidx]
             p_end = shell_prim_start[sidx + 1]
-            L = shell_L[sidx]
-            
+
             bf_val = 0.0
             for p in range(p_start, p_end):
                 alpha = prim_exp[p]
                 exp_part = math.exp(-alpha * r2)
-                # Exponential is zero for large r2
                 if exp_part < 1e-300:
                     continue
-                
                 coeff = prim_coeff[p]
                 rad_norm = prim_radial_norm[p]
-                
-                # Angular part
+
                 ang_part = 1.0
                 lx = basis_lx[bf_idx]
                 ly = basis_ly[bf_idx]
                 lz = basis_lz[bf_idx]
-                
                 if lx > 0:
                     ang_part *= rx ** lx
                 if ly > 0:
                     ang_part *= ry ** ly
                 if lz > 0:
                     ang_part *= rz ** lz
-                
+
                 full_norm = rad_norm * angular_norms[bf_idx]
                 bf_val += coeff * full_norm * ang_part * exp_part
-            
-            # Multiply by MO coefficient
+
             total += mo_coeffs[bf_idx] * bf_val
-        
+
         out_values[p_idx] = total
 
 
-def eval_mo_on_grid(atoms, basis_set, mo_coeffs, grid_spacing=0.1, padding=4.0):
-    """Evaluate a molecular orbital on a 3D grid.
-    
-    Parameters
-    ----------
-    atoms : list of Atom
-    basis_set : BasisSet
-    mo_coeffs : (nbasis,) array — coefficients for this MO
-    grid_spacing : float — grid resolution in Angstrom
-    padding : float — extra padding around molecule in Angstrom
-    
-    Returns
-    -------
-    grid_values : (nx, ny, nz) float64 array
-    origin : (3,) float64 — grid origin (minimum corner)
-    spacing : float — grid spacing
-    """
-    # Build atom centers array
+@njit(parallel=True)
+def _eval_basis_kernel(grid_points, atom_centers, basis_atom_idx, basis_shell_idx,
+                       basis_lx, basis_ly, basis_lz, angular_norms,
+                       shell_prim_start, shell_L, shell_cutoff_r2,
+                       prim_exp, prim_coeff, prim_radial_norm,
+                       out_basis):
+    """Evaluate all basis functions on all grid points. Result: (npoints, nbasis)."""
+    nbasis = basis_atom_idx.shape[0]
+    npoints = grid_points.shape[0]
+
+    for p_idx in prange(npoints):
+        x = grid_points[p_idx, 0]
+        y = grid_points[p_idx, 1]
+        z = grid_points[p_idx, 2]
+
+        for bf_idx in range(nbasis):
+            aidx = basis_atom_idx[bf_idx]
+            ax = atom_centers[aidx, 0]
+            ay = atom_centers[aidx, 1]
+            az = atom_centers[aidx, 2]
+            rx = x - ax
+            ry = y - ay
+            rz = z - az
+            r2 = rx * rx + ry * ry + rz * rz
+
+            sidx = basis_shell_idx[bf_idx]
+            if r2 > shell_cutoff_r2[sidx]:
+                out_basis[p_idx, bf_idx] = 0.0
+                continue
+
+            p_start = shell_prim_start[sidx]
+            p_end = shell_prim_start[sidx + 1]
+
+            bf_val = 0.0
+            for p in range(p_start, p_end):
+                alpha = prim_exp[p]
+                exp_part = math.exp(-alpha * r2)
+                if exp_part < 1e-300:
+                    continue
+                coeff = prim_coeff[p]
+                rad_norm = prim_radial_norm[p]
+
+                ang_part = 1.0
+                lx = basis_lx[bf_idx]
+                ly = basis_ly[bf_idx]
+                lz = basis_lz[bf_idx]
+                if lx > 0:
+                    ang_part *= rx ** lx
+                if ly > 0:
+                    ang_part *= ry ** ly
+                if lz > 0:
+                    ang_part *= rz ** lz
+
+                full_norm = rad_norm * angular_norms[bf_idx]
+                bf_val += coeff * full_norm * ang_part * exp_part
+
+            out_basis[p_idx, bf_idx] = bf_val
+
+
+@njit
+def _project_mo_kernel(basis_values, mo_coeffs, out_values):
+    """Fast MO projection: out = basis_values @ mo_coeffs."""
+    npoints = basis_values.shape[0]
+    nbasis = basis_values.shape[1]
+    for p_idx in range(npoints):
+        total = 0.0
+        for bf_idx in range(nbasis):
+            total += basis_values[p_idx, bf_idx] * mo_coeffs[bf_idx]
+        out_values[p_idx] = total
+
+
+# Basis function cache: shared across orbital switches at same grid spacing
+_basis_cache = {}  # key: spacing (rounded), value: (grid_points, basis_values, origin, spacing, shape)
+
+
+def _prepare_kernel_data(atoms, basis_set):
+    """Precompute flat arrays for the numba kernels. Cached by basis_set identity."""
     natom = len(atoms)
     atom_centers = np.zeros((natom, 3), dtype=np.float64)
     for i, atom in enumerate(atoms):
         atom_centers[i, 0] = atom.x
         atom_centers[i, 1] = atom.y
         atom_centers[i, 2] = atom.z
-    
-    # Bounding box
-    xyz_min = atom_centers.min(axis=0) - padding
-    xyz_max = atom_centers.max(axis=0) + padding
-    
-    # Grid dimensions
-    nx = max(2, int(np.ceil((xyz_max[0] - xyz_min[0]) / grid_spacing)) + 1)
-    ny = max(2, int(np.ceil((xyz_max[1] - xyz_min[1]) / grid_spacing)) + 1)
-    nz = max(2, int(np.ceil((xyz_max[2] - xyz_min[2]) / grid_spacing)) + 1)
-    
-    # Generate grid
-    x = np.linspace(xyz_min[0], xyz_max[0], nx, dtype=np.float64)
-    y = np.linspace(xyz_min[1], xyz_max[1], ny, dtype=np.float64)
-    z = np.linspace(xyz_min[2], xyz_max[2], nz, dtype=np.float64)
-    
-    XX, YY, ZZ = np.meshgrid(x, y, z, indexing='ij')
-    grid_points = np.column_stack((XX.ravel(), YY.ravel(), ZZ.ravel()))
-    
-    # Prepare basis set data for kernel
+
     basis_atom_idx = basis_set.get_atom_idx_array()
     basis_shell_idx = basis_set.get_shell_idx_array()
     lmn = basis_set.get_lmn_array()
@@ -544,28 +570,95 @@ def eval_mo_on_grid(atoms, basis_set, mo_coeffs, grid_spacing=0.1, padding=4.0):
     basis_ly = lmn[:, 1]
     basis_lz = lmn[:, 2]
     angular_norms = basis_set.get_angular_norm_array()
-    
-    shell_prim_start, shell_L, prim_exp, prim_coeff, prim_radial_norm = \
+
+    shell_prim_start, shell_L, shell_cutoff_r2, prim_exp, prim_coeff, prim_radial_norm = \
         basis_set.flatten_primitives()
-    
-    # MO coefficients
+
+    return (atom_centers, basis_atom_idx, basis_shell_idx,
+            basis_lx, basis_ly, basis_lz, angular_norms,
+            shell_prim_start, shell_L, shell_cutoff_r2,
+            prim_exp, prim_coeff, prim_radial_norm)
+
+
+def _build_grid(atoms, grid_spacing, padding=4.0):
+    """Build a 3D grid around the molecule."""
+    coords = np.array([[a.x, a.y, a.z] for a in atoms], dtype=np.float64)
+    xyz_min = coords.min(axis=0) - padding
+    xyz_max = coords.max(axis=0) + padding
+
+    nx = max(2, int(np.ceil((xyz_max[0] - xyz_min[0]) / grid_spacing)) + 1)
+    ny = max(2, int(np.ceil((xyz_max[1] - xyz_min[1]) / grid_spacing)) + 1)
+    nz = max(2, int(np.ceil((xyz_max[2] - xyz_min[2]) / grid_spacing)) + 1)
+
+    x = np.linspace(xyz_min[0], xyz_max[0], nx, dtype=np.float64)
+    y = np.linspace(xyz_min[1], xyz_max[1], ny, dtype=np.float64)
+    z = np.linspace(xyz_min[2], xyz_max[2], nz, dtype=np.float64)
+
+    XX, YY, ZZ = np.meshgrid(x, y, z, indexing='ij')
+    grid_points = np.column_stack((XX.ravel(), YY.ravel(), ZZ.ravel()))
+
+    return grid_points, xyz_min, grid_spacing, (nx, ny, nz)
+
+
+def eval_mo_on_grid(atoms, basis_set, mo_coeffs, grid_spacing=0.1, padding=4.0,
+                    use_cache=True):
+    """Evaluate a molecular orbital on a 3D grid.
+
+    Uses spatial cutoff for efficiency. Caches basis function values at each
+    grid spacing so that switching orbitals only requires a fast dot product.
+    """
+    cache_key = round(grid_spacing, 2)
+
+    # Check cache for basis function values
+    if use_cache and cache_key in _basis_cache:
+        cached_grid, cached_basis, cached_origin, cached_spacing, cached_shape = _basis_cache[cache_key]
+        mo_coeffs_arr = np.asarray(mo_coeffs, dtype=np.float64).ravel()
+        out_values = np.zeros(len(cached_grid), dtype=np.float64)
+        _project_mo_kernel(cached_basis, mo_coeffs_arr, out_values)
+        return out_values.reshape(cached_shape), cached_origin, cached_spacing
+
+    # Build grid
+    grid_points, origin, spacing, shape = _build_grid(atoms, grid_spacing, padding)
+
+    # Prepare kernel data
+    kdata = _prepare_kernel_data(atoms, basis_set)
+    (atom_centers, basis_atom_idx, basis_shell_idx,
+     basis_lx, basis_ly, basis_lz, angular_norms,
+     shell_prim_start, shell_L, shell_cutoff_r2,
+     prim_exp, prim_coeff, prim_radial_norm) = kdata
+
     mo_coeffs_arr = np.asarray(mo_coeffs, dtype=np.float64).ravel()
-    
-    # Output
     out_values = np.zeros(len(grid_points), dtype=np.float64)
-    
-    # Run kernel
-    _eval_mo_kernel(
-        grid_points, atom_centers, basis_atom_idx, basis_shell_idx,
-        basis_lx, basis_ly, basis_lz, angular_norms,
-        shell_prim_start, shell_L, prim_exp, prim_coeff, prim_radial_norm,
-        mo_coeffs_arr, out_values
-    )
-    
-    # Reshape to 3D
-    grid_values = out_values.reshape((nx, ny, nz))
-    
-    return grid_values, xyz_min, grid_spacing
+
+    # If caching is enabled, compute full basis matrix first
+    if use_cache and grid_spacing >= 0.15:  # only cache coarse/medium grids (saves RAM)
+        nbasis = basis_set.nbasis
+        out_basis = np.zeros((len(grid_points), nbasis), dtype=np.float64)
+        _eval_basis_kernel(
+            grid_points, atom_centers, basis_atom_idx, basis_shell_idx,
+            basis_lx, basis_ly, basis_lz, angular_norms,
+            shell_prim_start, shell_L, shell_cutoff_r2,
+            prim_exp, prim_coeff, prim_radial_norm,
+            out_basis)
+        # Cache for future orbital switches
+        _basis_cache[cache_key] = (grid_points, out_basis, origin, spacing, shape)
+        # Project to MO
+        _project_mo_kernel(out_basis, mo_coeffs_arr, out_values)
+    else:
+        # Direct evaluation (no caching for fine grids — saves RAM)
+        _eval_mo_kernel(
+            grid_points, atom_centers, basis_atom_idx, basis_shell_idx,
+            basis_lx, basis_ly, basis_lz, angular_norms,
+            shell_prim_start, shell_L, shell_cutoff_r2,
+            prim_exp, prim_coeff, prim_radial_norm,
+            mo_coeffs_arr, out_values)
+
+    return out_values.reshape(shape), origin, spacing
+
+
+def clear_basis_cache():
+    """Clear the global basis function cache (e.g., when loading a new file)."""
+    _basis_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -863,7 +956,7 @@ class OrbitalViewer(QMainWindow):
         self._refine_step = 0
         self._generation = 0  # increment on each new orbital request
         self._isovalue = 0.05
-        self._grid_spacing = 0.10
+        self._grid_spacing = 0.35  # coarse by default
         
         self._build_ui()
         self._build_menu()
@@ -916,12 +1009,24 @@ class OrbitalViewer(QMainWindow):
         ctrl_layout.addWidget(QLabel("Grid:"))
         self.grid_slider = QSlider(Qt.Orientation.Horizontal)
         self.grid_slider.setRange(5, 40)
-        self.grid_slider.setValue(10)
+        self.grid_slider.setValue(35)
         self.grid_slider.valueChanged.connect(self._on_grid_changed)
         ctrl_layout.addWidget(self.grid_slider)
-        self.grid_label = QLabel("0.10 Å")
+        self.grid_label = QLabel("0.35 Å")
         self.grid_label.setFixedWidth(50)
         ctrl_layout.addWidget(self.grid_label)
+
+        # Grid quality preset buttons
+        self.btn_coarse = QPushButton("Coarse")
+        self.btn_coarse.clicked.connect(lambda: self._set_grid_preset(0.35, 35))
+        ctrl_layout.addWidget(self.btn_coarse)
+        self.btn_medium = QPushButton("Medium")
+        self.btn_medium.clicked.connect(lambda: self._set_grid_preset(0.20, 20))
+        ctrl_layout.addWidget(self.btn_medium)
+        self.btn_fine = QPushButton("Fine")
+        self.btn_fine.clicked.connect(lambda: self._set_grid_preset(0.10, 10))
+        ctrl_layout.addWidget(self.btn_fine)
+
         ctrl_layout.addStretch()
         self.homo_btn = QPushButton("HOMO")
         self.homo_btn.clicked.connect(self._go_to_homo)
@@ -959,7 +1064,10 @@ class OrbitalViewer(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to parse file:\n{e}")
             self.status_bar.showMessage("Error loading file")
             return
-        
+
+        # Clear basis cache — new molecule, new basis set
+        clear_basis_cache()
+
         self.atoms = atoms
         self.basis_set = basis_set
         self.canon_wfn = canon_wfn
@@ -1108,6 +1216,11 @@ class OrbitalViewer(QMainWindow):
             gen = self._generation
             self._refine_step = 0
             self._start_grid_computation(self.active_mo_idx, self._grid_spacing, gen)
+
+    def _set_grid_preset(self, spacing, slider_value):
+        """Set grid to a preset quality (Coarse/Medium/Fine)."""
+        self.grid_slider.setValue(slider_value)
+        # Slider valueChanged will trigger _on_grid_changed
     
     def _go_to_homo(self):
         self._select_orbital(self.homo_idx, 'canonical')
@@ -1143,8 +1256,66 @@ class OrbitalViewer(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Image", "orbital.png", "PNG Images (*.png);;All Files (*)")
         if path:
-            self.orbital_canvas.screenshot(path)
+            self._export_with_overlay(path)
             self.status_bar.showMessage(f"Saved: {path}")
+
+    def _export_with_overlay(self, path):
+        """Render viewport and overlay orbital info, then save to PNG."""
+        from PyQt6.QtGui import QImage, QPainter, QColor, QFont
+
+        # Get vispy render
+        img_array = self.orbital_canvas.canvas.render()
+        h, w = img_array.shape[:2]
+
+        # Convert to QImage (RGBA8888)
+        img_8bit = (np.clip(img_array, 0, 1) * 255).astype(np.uint8)
+        qimg = QImage(img_8bit.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+
+        # Build overlay text
+        lines = []
+        if self.active_mo_idx >= 0 and self.active_wfn is not None:
+            label = self.active_wfn.labels[self.active_mo_idx]
+            lines.append(f"Orbital {self.active_mo_idx + 1} ({label})")
+            if self.active_wfn is self.canon_wfn and self.active_mo_idx < len(self.active_wfn.energies):
+                e = self.active_wfn.energies[self.active_mo_idx]
+                lines.append(f"Energy: {e:+.6f} Eh  ({e * 27.2114:+.2f} eV)")
+            lines.append(f"Isovalue: ±{self._isovalue:.3f}")
+        if self._current_spacing is not None:
+            lines.append(f"Grid: {self._current_spacing:.2f} Å")
+
+        if not lines:
+            qimg.save(path, 'PNG')
+            return
+
+        # Draw overlay text
+        painter = QPainter(qimg)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        font = QFont("monospace", 12)
+        font.setBold(True)
+        painter.setFont(font)
+
+        # Semi-transparent background for readability
+        padding = 8
+        line_height = 20
+        box_height = len(lines) * line_height + padding * 2
+        box_width = 0
+        metrics = painter.fontMetrics()
+        for line in lines:
+            box_width = max(box_width, metrics.horizontalAdvance(line))
+        box_width += padding * 2
+
+        # Draw background box (top-left)
+        painter.fillRect(0, 0, box_width, box_height, QColor(0, 0, 0, 180))
+        painter.setPen(QColor(255, 255, 255, 255))
+
+        y = padding + metrics.ascent()
+        for line in lines:
+            painter.drawText(padding, y, line)
+            y += line_height
+
+        painter.end()
+        qimg.save(path, 'PNG')
 
 
 # ---------------------------------------------------------------------------
