@@ -28,6 +28,9 @@ python orbital-visualizer.py --cli --orbital 40 --output homo.png calculation.lo
 | Change isovalue | Slider at bottom (0.01–0.20) |
 | Change grid resolution | Grid slider (0.05–0.40 Å, coarser = faster) |
 | Jump to HOMO/LUMO | HOMO / LUMO buttons |
+| Split viewport | Click **Split ▸** to compare two orbitals side by side |
+| Multiple molecules | File → Open or Ctrl+T to open additional molecules in new tabs |
+| Switch active viewport | Click viewport label (top bar) — blue border = active, gallery click goes there |
 | Export image | File → Export Image (`Ctrl+E`) |
 | CLI render | `--cli --orbital N --output file.png` |
 
@@ -52,7 +55,30 @@ NUMBA_NUM_THREADS=4 ./orbital-visualizer calculation.log
 ### Requirements
 
 - Python 3.10+
-- Dependencies (installed by `setup.sh`): `cclib`, `numba`, `vispy`, `scikit-image`, `PyQt6`
+- Python packages (installed by `setup.sh`): `cclib`, `numba`, `vispy`, `scikit-image`, `PyQt6`
+- **System OpenGL drivers** — Mesa or proprietary GPU drivers
+
+| Distro | Install command |
+|--------|----------------|
+| Ubuntu / Debian | `sudo apt install libgl1-mesa-glx libegl1-mesa mesa-utils` |
+| Fedora / RHEL | `sudo dnf install mesa-libGL mesa-libEGL glx-utils` |
+| Arch | `sudo pacman -S mesa libglvnd` |
+| openSUSE | `sudo zypper install Mesa-libGL1 Mesa-libEGL1` |
+
+### Platform notes
+
+- **X11**: Fully supported (GLX)
+- **Wayland (GNOME, KDE)**: Supported via Qt6's EGL backend. Ensure `libegl1-mesa` is installed.
+  The PyQt6 wheel ships its own `libqwayland.so` — no extra Qt packages needed.
+- **WSL2**: Works with `wslg` (built-in X11/Wayland). Install Mesa if missing.
+- **macOS**: Untested. PyQt6 + vispy work on macOS but scene camera may need tuning.
+- **Windows**: Untested. Should work with PyQt6 wheel (ships ANGLE/OpenGL ES).
+- **Headless / SSH**: Use `--cli` mode (no GUI, renders to PNG).
+- **Troubleshooting**: If you get a black window or OpenGL errors, try:
+  ```bash
+  QT_QPA_PLATFORM=xcb ./orbital-visualizer file.log   # force X11 on Wayland
+  NUMBA_NUM_THREADS=1 ./orbital-visualizer file.log   # limit to 1 thread
+  ```
 
 ## Files
 

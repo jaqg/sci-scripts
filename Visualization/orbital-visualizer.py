@@ -1560,8 +1560,34 @@ def main():
     from vispy.app import use_app
     use_app('pyqt6')
     
+    # Check OpenGL availability before creating any widgets
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
+    from PyQt6.QtGui import QOpenGLContext, QSurfaceFormat
+    
+    # Request OpenGL 3.3 core profile (available on Mesa 10+, any distro from 2015+)
+    fmt = QSurfaceFormat()
+    fmt.setVersion(3, 3)
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+    QSurfaceFormat.setDefaultFormat(fmt)
+    
+    # Quick smoke test: create temporary GL context
+    temp_ctx = QOpenGLContext()
+    if not temp_ctx.create():
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            None, "OpenGL Error",
+            "Cannot create OpenGL 3.3 context. Install system GPU drivers.\n\n"
+            "Ubuntu/Debian:   sudo apt install libgl1-mesa-glx libegl1-mesa mesa-utils\n"
+            "Fedora/RHEL:     sudo dnf install mesa-libGL mesa-libEGL glx-utils\n"
+            "Arch:            sudo pacman -S mesa libglvnd\n"
+            "openSUSE:        sudo zypper install Mesa-libGL1 Mesa-libEGL1\n\n"
+            f"Qt platform: {app.platformName()}\n"
+            "On Wayland, ensure qt6-wayland is installed (or try QT_QPA_PLATFORM=xcb)."
+        )
+        sys.exit(1)
+    del temp_ctx
+    
     app.setApplicationName("Orbital Visualizer")
     
     viewer = OrbitalViewer(logpath=args.logfile)
