@@ -1580,6 +1580,10 @@ class OrbitalViewer(QMainWindow):
         self.status_bar.showMessage(
             f"Loaded: {len(atoms)} atoms, {basis_set.nbasis} bf, "
             f"{canon_wfn.nmo} MOs, HOMO={homo_idx + 1}")
+        
+        # Pre-warm: auto-load HOMO so JIT compilation happens now,
+        # not on first user click. GridWorker runs in background thread.
+        tab._go_to_homo()
     
     def _close_tab(self, index):
         if index < 0 or index >= len(self._sessions):
