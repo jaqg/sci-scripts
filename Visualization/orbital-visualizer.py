@@ -996,6 +996,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QSplitter, QListWidget, QListWidgetItem, QTabWidget,
     QLabel, QSlider, QPushButton, QFileDialog, QStatusBar,
+    QLineEdit,
     QMessageBox, QApplication,
     QDialog, QTreeWidget, QTreeWidgetItem, QAbstractItemView,
     QComboBox, QDoubleSpinBox
@@ -1234,9 +1235,13 @@ class MoleculeTab(QWidget):
         self.isovalue_slider.setValue(50)
         self.isovalue_slider.valueChanged.connect(self._on_isovalue_changed)
         ctrl_layout.addWidget(self.isovalue_slider)
-        self.isovalue_label = QLabel("0.050")
-        self.isovalue_label.setFixedWidth(40)
-        ctrl_layout.addWidget(self.isovalue_label)
+        self.isovalue_edit = QLineEdit("0.050")
+        self.isovalue_edit.setFixedWidth(50)
+        self.isovalue_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.isovalue_edit.setStyleSheet("QLineEdit { border: 1px solid #555; background: #1a1a1a; color: #fff; padding: 1px; }")
+        self.isovalue_edit.editingFinished.connect(self._on_isovalue_edited)
+        self.isovalue_edit.returnPressed.connect(self._on_isovalue_edited)
+        ctrl_layout.addWidget(self.isovalue_edit)
         
         ctrl_layout.addSpacing(10)
         ctrl_layout.addWidget(QLabel("Grid:"))
@@ -1245,9 +1250,13 @@ class MoleculeTab(QWidget):
         self.grid_slider.setValue(35)
         self.grid_slider.valueChanged.connect(self._on_grid_changed)
         ctrl_layout.addWidget(self.grid_slider)
-        self.grid_label = QLabel("0.35 Å")
-        self.grid_label.setFixedWidth(50)
-        ctrl_layout.addWidget(self.grid_label)
+        self.grid_edit = QLineEdit("0.35")
+        self.grid_edit.setFixedWidth(50)
+        self.grid_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.grid_edit.setStyleSheet("QLineEdit { border: 1px solid #555; background: #1a1a1a; color: #fff; padding: 1px; }")
+        self.grid_edit.editingFinished.connect(self._on_grid_edited)
+        self.grid_edit.returnPressed.connect(self._on_grid_edited)
+        ctrl_layout.addWidget(self.grid_edit)
         
         for label, sp, sv in [("Coarse", 0.35, 35), ("Medium", 0.20, 20), ("Fine", 0.10, 10)]:
             btn = QPushButton(label)
@@ -1377,14 +1386,35 @@ class MoleculeTab(QWidget):
     
     def _on_isovalue_changed(self, value):
         self._isovalue = value / 1000.0
-        self.isovalue_label.setText(f"{self._isovalue:.3f}")
+        self.isovalue_edit.blockSignals(True)
+        self.isovalue_edit.setText(f"{self._isovalue:.3f}")
+        self.isovalue_edit.blockSignals(False)
         for vp in self._viewports:
             if vp._current_grid_values is not None:
                 vp.update_surface(self._isovalue)
     
+    def _on_isovalue_edited(self):
+        """Handle manual isovalue input."""
+        try:
+            val = float(self.isovalue_edit.text())
+            val = max(0.001, min(0.200, val))
+            # Convert to slider value: slider = val * 1000
+            slider_val = int(round(val * 1000))
+            slider_val = max(10, min(200, slider_val))
+            if slider_val != self.isovalue_slider.value():
+                self.isovalue_slider.setValue(slider_val)
+            else:
+                # Force update display even if slider didn't move
+                self._isovalue = slider_val / 1000.0
+                self.isovalue_edit.setText(f"{self._isovalue:.3f}")
+        except ValueError:
+            self.isovalue_edit.setText(f"{self._isovalue:.3f}")
+    
     def _on_grid_changed(self, value):
         self._grid_spacing = value / 100.0
-        self.grid_label.setText(f"{self._grid_spacing:.2f} Å")
+        self.grid_edit.blockSignals(True)
+        self.grid_edit.setText(f"{self._grid_spacing:.2f}")
+        self.grid_edit.blockSignals(False)
         for vp in self._viewports:
             if vp.mo_idx >= 0:
                 self._refining[id(vp)] = 0
@@ -1392,6 +1422,20 @@ class MoleculeTab(QWidget):
                 vp._cancel_computation()
                 vp._generation += 1
                 vp._start_compute(vp.current_wfn.get_mo(vp.mo_idx), self._grid_spacing, vp._generation)
+    
+    def _on_grid_edited(self):
+        """Handle manual grid spacing input."""
+        try:
+            val = float(self.grid_edit.text())
+            val = max(0.05, min(0.40, val))
+            slider_val = max(5, min(40, int(round(val * 100))))
+            if slider_val != self.grid_slider.value():
+                self.grid_slider.setValue(slider_val)
+            else:
+                self._grid_spacing = slider_val / 100.0
+                self.grid_edit.setText(f"{self._grid_spacing:.2f}")
+        except ValueError:
+            self.grid_edit.setText(f"{self._grid_spacing:.2f}")
     
     def _set_grid_preset(self, spacing, slider_value):
         self.grid_slider.setValue(slider_value)
