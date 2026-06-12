@@ -293,18 +293,19 @@ def parse_progress(filepath):
         pass  # keep 'complete'
     elif info['opt_converged'] and info['freq_started']:
         info['phase'] = 'frequency'
-        info['phase_detail'] = 'Vibrational frequency calculation'
+        info['phase_detail'] = 'Frequency calculation'
     elif info['opt_converged']:
         info['phase'] = 'opt_converged'
         info['phase_detail'] = 'Geometry optimization converged'
     elif last_step_match:
         info['phase'] = 'optimization'
+        step_info = f'step {info["step_current"]}'
         if info['scf_converged'] and info['td_in_progress']:
-            info['phase_detail'] = f'TDDFT (step {info["step_current"]}/{info["step_max"]})'
+            info['phase_detail'] = f'TDDFT ({step_info})'
         elif info['scf_converged']:
-            info['phase_detail'] = f'Gradient calc (step {info["step_current"]}/{info["step_max"]})'
+            info['phase_detail'] = f'Gradient calc ({step_info})'
         else:
-            info['phase_detail'] = f'SCF (step {info["step_current"]}/{info["step_max"]}, cycle {info["scf_cycle"]})'
+            info['phase_detail'] = f'SCF ({step_info}, cycle {info["scf_cycle"]})'
     elif last_berny is not None:
         info['phase'] = 'optimization'
         info['phase_detail'] = 'Optimization initializing...'
@@ -351,16 +352,15 @@ def estimate_percent(info, expected_steps=8,
 
     if info['phase'] in ('optimization', 'opt_converged'):
         if info['opt_converged'] and not info['freq_started']:
-            return (w1 + w2)
+            return w1 + w2
 
         # Estimate based on steps
         current = info['step_current']
         max_steps = info['step_max'] if info['step_max'] > 0 else expected_steps
 
         # Use expected_steps as the expected convergence point
-        # (max_steps is usually 151, the hardcoded limit)
-        effective_max = min(expected_steps, max_steps) if max_steps > expected_steps else max_steps
-        step_frac = min(current / effective_max, 1.0)
+        # (max_steps is the Gaussian hardcoded limit, usually 106 or 151)
+        effective_max = expected_steps
 
         # Sub-step progress: based on SCF vs TDDFT vs gradient phases
         sub_pct = 0.0
@@ -374,11 +374,14 @@ def estimate_percent(info, expected_steps=8,
         else:
             sub_pct = 0.05
 
-        # Blend: step_frac covers completed steps, sub_pct covers current step
-        if current > 1:
+        # Blend: completed steps + fraction of current step
+        if current > 0:
             step_progress = ((current - 1) + sub_pct) / effective_max
         else:
-            step_progress = sub_pct / effective_max
+            step_progress = 0.0
+
+        # Cap at 1.0 to prevent >100% when current > expected_steps
+        step_progress = min(step_progress, 1.0)
 
         return w1 + step_progress * w2
 
@@ -406,8 +409,6 @@ def format_progress(info, expected_steps=8,
                            weight_initial_scf, weight_opt, weight_freq)
 
     bar_width = 30
-    filled = int(pct / 100.0 * bar_width)
-    bar = '█' * filled + '░' * (bar_width - filled)
 
     phase_icon = {
         'startup': '⚙',
@@ -421,13 +422,25 @@ def format_progress(info, expected_steps=8,
     elapsed = info.get('elapsed_wall', '?') or '?'
 
     # Build extra detail
+    # --- Build phase pipeline ---
+    scf_status = '✓' if (info['phase'] in ('optimization','opt_converged','frequency','complete')
+                          or (info['phase'] == 'initial_scf' and info['scf_converged'])) \
+                 else ('▸' if info['phase'] == 'initial_scf' else '·')
+    opt_status = '✓' if info['phase'] in ('opt_converged','frequency','complete') \
+                 else ('▸' if info['phase'] == 'optimization' else '·')
+    freq_status = '✓' if info['phase'] == 'complete' \
+                  else ('▸' if info['phase'] == 'frequency' else '·')
+
+    pipeline = f"[SCF{scf_status}]→[Opt{opt_status}]→[Freq{freq_status}]"
+
+    # --- Build detail line ---
     detail_parts = []
     if info['step_current'] > 0:
-        detail_parts.append(f"step {info['step_current']}/{info['step_max']}")
-    if info['scf_cycle'] > 0 and info['phase'] != 'initial_scf':
-        detail_parts.append(f"SCF c{info['scf_cycle']}")
-    elif info['scf_cycle'] > 0:
+        detail_parts.append(f"step {info['step_current']}")
+    if info['scf_cycle'] > 0 and info['phase'] == 'initial_scf':
         detail_parts.append(f"c{info['scf_cycle']}")
+    elif info['scf_cycle'] > 0:
+        detail_parts.append(f"SCF c{info['scf_cycle']}")
     if info['max_force'] is not None:
         detail_parts.append(f"MaxF={info['max_force']:.6f}")
     if info['forces_converged']:
@@ -439,12 +452,18 @@ def format_progress(info, expected_steps=8,
     if info.get('td_nstates'):
         detail_parts.append(f"NSt={info['td_nstates']}")
 
-    detail = ' | '.join(detail_parts) if detail_parts else info['phase_detail']
+    detail = ' | '.join(detail_parts) if detail_parts else ''
 
-    return (f"{phase_icon} [{bar}] {pct:5.1f}%  "
-            f"{info['phase_detail']:45s}  "
+    # Cap bar display at 100%
+    pct_display = min(pct, 100.0)
+    filled = min(int(pct_display / 100.0 * bar_width), bar_width)
+    bar = '█' * filled + '░' * (bar_width - filled)
+
+    return (f"{phase_icon} [{bar}] {pct_display:5.1f}%  "
+            f"{pipeline:28s}  "
+            f"{info['phase_detail']:42s}  "
             f"⌛ {elapsed}  "
-            f"({detail})")
+            f"{'(' + detail + ')' if detail else ''}")
 
 
 def format_detail_block(info):
