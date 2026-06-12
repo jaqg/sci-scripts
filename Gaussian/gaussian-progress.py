@@ -82,19 +82,26 @@ def parse_progress(filepath):
         'step_max': 0,
         'scf_cycle': 0,
         'scf_energy': None,
+        'scf_energy_prev': None,
         'scf_converged': False,
         'max_force': None,
         'rms_force': None,
         'max_disp': None,
         'rms_disp': None,
+        'conv_thresholds': {},
         'forces_converged': False,
         'disps_converged': False,
         'td_in_progress': False,
         'td_nstates': None,
+        'td_excitation_ev': None,
+        'td_oscillator': None,
+        'td_wavelength_nm': None,
         'opt_converged': False,
         'freq_started': False,
         'job_finished': False,
         'elapsed_wall': None,
+        'cpu_time': None,
+        'route_card': None,
         'percent': 0.0,
     }
 
@@ -189,70 +196,72 @@ def parse_progress(filepath):
                 last_step_match = (int(m.group(1)), int(m.group(2)))
                 break
 
-    # Find last SCF Done
+    # Find SCF Done lines (need last TWO for Delta E)
+    scf_energies = []
     last_scf = None
-    for line in reversed(lines):
+    for line in lines:
         m = re.search(r'SCF Done:\s+E\([^)]+\)\s*=\s*(\S+)\s+A\.U\.\s+after\s+(\d+)\s+cycles', line)
         if m:
-            last_scf = (float(m.group(1)), int(m.group(2)))
-            break
+            scf_energies.append((float(m.group(1)), int(m.group(2))))
+    if scf_energies:
+        last_scf = scf_energies[-1]
+        info['scf_energy'] = last_scf[0]
+        info['scf_cycle'] = last_scf[1]
+        if len(scf_energies) >= 2:
+            info['scf_energy_prev'] = scf_energies[-2][0]
+    else:
+        last_scf = None
 
-    # Find last convergence check
-    for line in reversed(lines):
-        mf = re.search(r'Maximum Force\s+(\S+)\s+\S+\s+(YES|NO)', line)
-        rf = re.search(r'RMS\s+Force\s+(\S+)\s+\S+\s+(YES|NO)', line)
-        md = re.search(r'Maximum Displacement\s+(\S+)\s+\S+\s+(YES|NO)', line)
-        rd = re.search(r'RMS\s+Displacement\s+(\S+)\s+\S+\s+(YES|NO)', line)
-        if mf:
-            info['max_force'] = float(mf.group(1))
-            info['forces_converged'] = (mf.group(2) == 'YES')
-            break  # Use the last set
-
-    # Actually, need to find the LAST full convergence block.
-    # Scan for the block pattern: Maximum Force / RMS Force / Max Disp / RMS Disp
+    # Parse LAST full convergence block: Maximum Force / RMS Force / Max Disp / RMS Disp
     for i in range(len(lines) - 1, -1, -1):
-        if 'Maximum Force' in lines[i] and 'RMS' in lines[i] and 'Displacement' in lines[i]:
-            # This line contains all four? No, they're separate lines.
-            pass
-    # Let me do a better scan
-    conv_block = {'max_force': None, 'rms_force': None, 'max_disp': None, 'rms_disp': None}
-    for i in range(len(lines) - 10, -1, -1):
-        if i < 0:
-            break
-        mf = re.search(r'Maximum Force\s+(\S+)\s+\S+\s+(YES|NO)', lines[i])
-        if mf:
-            # Found a convergence block; read forward
-            conv_block['max_force'] = float(mf.group(1))
-            info['forces_converged'] = (mf.group(2) == 'YES')
-            for j in range(i+1, min(i+5, len(lines))):
-                rf = re.search(r'RMS\s+Force\s+(\S+)\s+\S+\s+(YES|NO)', lines[j])
-                md = re.search(r'Maximum Displacement\s+(\S+)\s+\S+\s+(YES|NO)', lines[j])
-                rd = re.search(r'RMS\s+Displacement\s+(\S+)\s+\S+\s+(YES|NO)', lines[j])
-                if rf:
-                    conv_block['rms_force'] = float(rf.group(1))
-                if md:
-                    conv_block['max_disp'] = float(md.group(1))
-                    info['disps_converged'] = (md.group(2) == 'YES')
-                if rd:
-                    conv_block['rms_disp'] = float(rd.group(1))
-            break
+        mf = re.search(r'Maximum Force\s+(\S+)\s+(\S+)\s+(YES|NO)', lines[i])
+        if not mf:
+            continue
+        conv = {'Max Force': (float(mf.group(1)), float(mf.group(2)), mf.group(3))}
+        for j in range(i+1, min(i+5, len(lines))):
+            for label, key in [('RMS     Force', 'RMS Force'),
+                               ('Maximum Displacement', 'Max Disp'),
+                               ('RMS     Displacement', 'RMS Disp')]:
+                if label in lines[j]:
+                    rm = re.search(label + r'\s+(\S+)\s+(\S+)\s+(YES|NO)', lines[j])
+                    if rm:
+                        conv[key] = (float(rm.group(1)), float(rm.group(2)), rm.group(3))
+        for key in ['Max Force', 'RMS Force', 'Max Disp', 'RMS Disp']:
+            if key in conv:
+                val, thr, yn = conv[key]
+                info['conv_thresholds'][key] = thr
+                if key == 'Max Force':
+                    info['max_force'] = val
+                    info['forces_converged'] = (yn == 'YES')
+                elif key == 'RMS Force':
+                    info['rms_force'] = val
+                elif key == 'Max Disp':
+                    info['max_disp'] = val
+                    info['disps_converged'] = (yn == 'YES')
+                elif key == 'RMS Disp':
+                    info['rms_disp'] = val
+        break
 
-    info['max_force'] = conv_block['max_force'] or info['max_force']
-    info['rms_force'] = conv_block['rms_force']
-
-    # Check if TDDFT is in progress
-    for i in range(max(0, len(lines)-50), len(lines)):
+    # TDDFT excitation data: find last block, parse exc. energy + osc strength
+    for i in range(len(lines) - 1, -1, -1):
         if 'Excitation energies and oscillator strengths' in lines[i]:
             info['td_in_progress'] = True
-            # Check if TDDFT output follows (excited states printed)
-            for j in range(i, min(i+200, len(lines))):
-                m = re.search(r'Excited State\s+\d+:', lines[j])
-                if m:
-                    info['td_in_progress'] = True
+            for j in range(i+1, min(i+50, len(lines))):
+                em = re.search(r'Excited State\s+(\d+):\s+\S+\s+(\S+)\s+eV\s+(\S+)\s+nm\s+f=(\S+)', lines[j])
+                if em:
+                    info['td_excitation_ev'] = float(em.group(2))
+                    info['td_wavelength_nm'] = float(em.group(3))
+                    info['td_oscillator'] = float(em.group(4))
                     break
             break
 
-    # Try to detect NStates from TD(NStates=...) in route
+    # Route card extraction (first # line in file)
+    for line in lines[:min(200, len(lines))]:
+        if re.match(r'\s*#', line) and 'Gaussian' not in line:
+            info['route_card'] = line.strip()
+            break
+
+    # Detect NStates from TD(NStates=...) in route
     for line in lines[:min(200, len(lines))]:
         m = re.search(r'[Tt][Dd]\s*\(\s*[Nn][Ss][Tt][Aa][Tt][Ee][Ss]\s*=\s*(\d+)', line)
         if m:
@@ -281,11 +290,16 @@ def parse_progress(filepath):
             info['scf_converged'] = True
             break
 
-    # Elapsed wall time (last occurrence)
+    # Elapsed wall time and CPU time (last occurrences)
     for line in reversed(lines):
         m = re.search(r'Elapsed time:\s+(.*)', line)
         if m:
             info['elapsed_wall'] = m.group(1).strip()
+            break
+    for line in reversed(lines):
+        m = re.search(r'Job cpu time:\s+(.*)', line)
+        if m:
+            info['cpu_time'] = m.group(1).strip()
             break
 
     # --- Determine phase ---
@@ -466,28 +480,122 @@ def format_progress(info, expected_steps=8,
             f"{'(' + detail + ')' if detail else ''}")
 
 
-def format_detail_block(info):
+def format_detail_block(info, expected_steps=8,
+                       weight_initial_scf=15.0, weight_opt=70.0, weight_freq=15.0):
     """Return multi-line detailed status."""
+    pct = estimate_percent(info, expected_steps,
+                           weight_initial_scf, weight_opt, weight_freq)
     lines = []
-    lines.append(f"File:       {info['filename']}")
-    lines.append(f"Phase:      {info['phase']} ({info['phase_detail']})")
-    lines.append(f"Lines:      {info['total_lines']}")
-    lines.append(f"Elapsed:    {info['elapsed_wall'] or 'unknown'}")
+    lines.append(f"{'='*60}")
+    lines.append(f"  File:        {info['filename']}")
+    if info.get('route_card'):
+        lines.append(f"  Route:       {info['route_card']}")
+    lines.append(f"  Phase:       {info['phase']}  |  {info['phase_detail']}")
+    lines.append(f"  Progress:    {min(pct, 100.0):.1f}%")
+    lines.append(f"  Log lines:   {info['total_lines']}")
+    lines.append(f"{'='*60}")
+
+    # --- Timings ---
+    lines.append(f"\n  Elapsed:     {info['elapsed_wall'] or 'unknown'}")
+    if info.get('cpu_time'):
+        lines.append(f"  CPU time:    {info['cpu_time']}")
+    if info['step_current'] > 0 and info['elapsed_wall'] and not info['job_finished']:
+        # Estimate remaining time (only for in-progress jobs)
+        try:
+            elapsed_sec = _parse_time_to_seconds(info['elapsed_wall'])
+            steps_done = info['step_current']
+            steps_left = max(0, expected_steps - steps_done)
+            if steps_done > 0:
+                sec_per_step = elapsed_sec / steps_done
+                remaining_sec = sec_per_step * steps_left
+                lines.append(f"  Time/step:   {_format_seconds(sec_per_step)}")
+                lines.append(f"  Est. remain: {_format_seconds(remaining_sec)}  ({steps_left} steps @ ~{expected_steps} expected)")
+        except (ValueError, TypeError):
+            pass
+
+    # --- SCF & Energy ---
+    lines.append(f"\n  --- SCF / Energy ---")
     if info['scf_energy']:
-        lines.append(f"SCF Energy: {info['scf_energy']:.8f}")
-    lines.append(f"SCF cycles: {info['scf_cycle']} (converged: {info['scf_converged']})")
+        lines.append(f"  SCF Energy:  {info['scf_energy']:.8f} a.u.")
+    if info.get('scf_energy_prev'):
+        de = (info['scf_energy'] - info['scf_energy_prev']) * 627.509  # kcal/mol
+        lines.append(f"  Delta E:     {de:+.4f} kcal/mol  (from previous step)")
+    lines.append(f"  SCF cycles:  {info['scf_cycle']}  (converged: {info['scf_converged']})")
+
+    # --- Optimization ---
     if info['step_current'] > 0:
-        lines.append(f"Opt step:   {info['step_current']} / {info['step_max']}")
-    if info['max_force'] is not None:
-        lines.append(f"Max Force:  {info['max_force']:.6f}  (conv: {info['forces_converged']})")
-    if info['rms_force'] is not None:
-        lines.append(f"RMS Force:  {info['rms_force']:.6f}")
-    lines.append(f"TDDFT:      {'active' if info['td_in_progress'] else 'idle'}" +
-                 (f" (NStates={info['td_nstates']})" if info['td_nstates'] else ''))
-    lines.append(f"Opt conv:   {info['opt_converged']}")
-    lines.append(f"Freq start: {info['freq_started']}")
-    lines.append(f"Finished:   {info['job_finished']}")
+        lines.append(f"\n  --- Optimization ---")
+        lines.append(f"  Opt step:    {info['step_current']}  (max allowed: {info['step_max']})")
+        lines.append(f"  Converged:   {info['opt_converged']}")
+
+    # --- Convergence criteria table ---
+    if info['conv_thresholds']:
+        lines.append(f"\n  --- Convergence Criteria ---")
+        header = f"  {'Item':22s} {'Value':>12s} {'Threshold':>12s}  Status"
+        lines.append(header)
+        lines.append(f"  {'-'*22} {'-'*12} {'-'*12}  ------")
+        for item in ['Max Force', 'RMS Force', 'Max Disp', 'RMS Disp']:
+            if item in info['conv_thresholds']:
+                thr = info['conv_thresholds'][item]
+                if item == 'Max Force':
+                    val = info['max_force']
+                    ok = info['forces_converged']
+                elif item == 'RMS Force':
+                    val = info['rms_force']
+                    ok = (val is not None and val < thr)
+                elif item == 'Max Disp':
+                    val = info['max_disp']
+                    ok = info['disps_converged']
+                else:
+                    val = info['rms_disp']
+                    ok = (val is not None and val < thr)
+                if val is not None:
+                    status = '✓ YES' if ok else '✗ NO'
+                    lines.append(f"  {item:22s} {val:12.6f} {thr:12.6f}  {status}")
+
+    # --- TDDFT ---
+    if info.get('td_nstates') or info.get('td_excitation_ev'):
+        lines.append(f"\n  --- TDDFT ---")
+        if info.get('td_nstates'):
+            lines.append(f"  NStates:     {info['td_nstates']}")
+        if info.get('td_excitation_ev'):
+            lines.append(f"  Exc. Energy: {info['td_excitation_ev']:.4f} eV  =  {info.get('td_wavelength_nm', '?'):.2f} nm")
+        if info.get('td_oscillator') is not None:
+            lines.append(f"  Osc. str. f: {info['td_oscillator']:.4f}")
+        lines.append(f"  TD in prog:  {info['td_in_progress']}")
+
+    # --- Job status ---
+    lines.append(f"\n  --- Job Status ---")
+    lines.append(f"  Freq started: {info['freq_started']}")
+    lines.append(f"  Finished:     {info['job_finished']}")
+
     return '\n'.join(lines)
+
+
+def _parse_time_to_seconds(time_str):
+    """Parse 'X days Y hours Z minutes W.M seconds' into total seconds."""
+    days = hours = minutes = seconds = 0
+    m = re.search(r'(\d+)\s*days', time_str)
+    if m: days = int(m.group(1))
+    m = re.search(r'(\d+)\s*hours', time_str)
+    if m: hours = int(m.group(1))
+    m = re.search(r'(\d+)\s*minutes', time_str)
+    if m: minutes = int(m.group(1))
+    m = re.search(r'(\d+(?:\.\d+)?)\s*seconds?', time_str)
+    if m: seconds = float(m.group(1))
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def _format_seconds(total_sec):
+    """Format seconds into human-readable string."""
+    if total_sec < 60:
+        return f"{total_sec:.0f}s"
+    elif total_sec < 3600:
+        return f"{total_sec/60:.1f} min"
+    else:
+        h = int(total_sec // 3600)
+        m = int((total_sec % 3600) // 60)
+        return f"{h}h {m}m"
 
 
 # ---------------------------------------------------------------------------
@@ -534,10 +642,8 @@ def main():
             print(f"ERROR: cannot read file: {args.logfile}", file=sys.stderr)
             return False
         if args.detail:
-            print(format_detail_block(info))
-            pct = estimate_percent(info, args.expected_steps,
-                                   w_scf, w_opt, w_freq)
-            print(f"\nEstimated progress: {pct:.1f}%")
+            print(format_detail_block(info, args.expected_steps,
+                                       w_scf, w_opt, w_freq))
         else:
             print(format_progress(info, args.expected_steps,
                                   w_scf, w_opt, w_freq))
