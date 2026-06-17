@@ -22,14 +22,17 @@
 Interactive orbital viewer — equivalent to VMD's Graphical Representations → Orbital panel as a standalone application. Primary use: browsing orbitals to identify specific bonding/antibonding features, not publication figure generation.
 
 ### Input
-- CLI argument: `python orbital-visualizer.py calculation.log`
+- CLI argument: `python orbital-visualizer.py calculation.log` or `python orbital-visualizer.py file.fchk`
 - GUI: File → Open dialog
-- GAMESS `.log` files only initially; adapter pattern for future formats
+- GAMESS `.log` files and Gaussian `.fchk` files supported
+- For Gaussian `.chk` (binary): convert first with `formchk file.chk file.fchk`
+- Format auto-detected by file extension (.log/.out → GAMESS, .fchk → Gaussian)
+- **NTOs (Natural Transition Orbitals)**: Computed automatically from "G to E trans densities" in .fchk files from TDDFT/TDA calculations with `Pop=NTO`. Hole and particle NTOs available for each excited state in the NTO panel.
 
 ### Parsing strategy
-- cclib for geometry, basis set (`data.gbasis`), and canonical MO coefficients (`data.mocoeffs`)
-- Post-cclib scan of raw `.log` text for localized orbital markers and coefficient blocks
-- Markers: `THE BOYS LOCALIZED ORBITALS ARE`, `THE PIPEK-MEZEY POPULATION LOCALIZED ORBITALS ARE`, `EDMISTON-RUEDENBERG ENERGY LOCALIZED ORBITALS`
+- GAMESS `.log`: cclib for geometry, basis set (`data.gbasis`), and canonical MO coefficients (`data.mocoeffs`). Post-cclib scan of raw `.log` text for localized orbital markers and coefficient blocks.
+- Gaussian `.fchk`: cclib for atoms, MO energies, and MO coefficients. Custom parser for basis set data (shell types, primitives, contraction coefficients) from fchk ASCII sections. Spherical harmonic shells (negative fchk shell type codes) expanded via HORTON-derived transformation matrices to Cartesian for evaluation.
+- Markers (GAMESS): `THE BOYS LOCALIZED ORBITALS ARE`, `THE PIPEK-MEZEY POPULATION LOCALIZED ORBITALS ARE`, `EDMISTON-RUEDENBERG ENERGY LOCALIZED ORBITALS`
 - Future formats use adapter pattern: populate shared internal data structures (Molecule, BasisSet, Wavefunction)
 
 ### Basis function evaluation

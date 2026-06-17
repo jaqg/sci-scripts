@@ -176,6 +176,65 @@ class Wavefunction:
 
 
 # ---------------------------------------------------------------------------
+# FChk helper: read a data section from Gaussian formatted checkpoint text
+# ---------------------------------------------------------------------------
+
+def _read_fchk_array(text, field_name, dtype):
+    """Read a data section from Gaussian fchk text (scalar or array).
+
+    Returns numpy array of dtype (np.int32 or np.float64).
+    """
+    import re
+    escaped = re.escape(field_name)
+
+    # Try array field: "Field Name         I/R   N=   NNN"
+    pattern_arr = escaped + r'\s+[IRC]\s+N=\s+(\d+)'
+    match = re.search(pattern_arr, text)
+
+    if match:
+        nvals = int(match.group(1))
+        data_start = text.find('\n', match.end()) + 1
+        if data_start == 0:
+            raise ValueError(f"Unexpected end of file after header '{field_name}'")
+
+        # Find next header (line starting with letter, containing I/R/C type tag)
+        next_header = float('inf')
+        for m in re.finditer(r'\n([A-Za-z])', text[data_start:]):
+            pos = data_start + m.start() + 1
+            snippet = text[pos:pos + 80]
+            if re.match(r'[A-Za-z].{20,}?\s+[IRC]\s', snippet):
+                next_header = pos
+                break
+
+        data_block = text[data_start:next_header]
+
+        if dtype == int:
+            values = [int(x) for x in data_block.split()]
+        else:
+            values = [float(x.replace('D', 'E')) for x in data_block.split()]
+
+        if len(values) != nvals:
+            raise ValueError(
+                f"Field '{field_name}': expected {nvals} values, got {len(values)}"
+            )
+
+        dtype_np = np.float64 if dtype == float else np.int32
+        return np.array(values, dtype=dtype_np)
+
+    # Scalar field: "Field Name         I/R            value"
+    pattern_scalar = escaped + r'\s+[IRC]\s+(-?\d+\.?\d*(?:[EeDd][+-]?\d+)?)'
+    match = re.search(pattern_scalar, text)
+    if not match:
+        raise ValueError(f"Field '{field_name}' not found in fchk file")
+
+    val_str = match.group(1).replace('D', 'E')
+    if dtype == int:
+        return np.array([int(float(val_str))], dtype=np.int32)
+    else:
+        return np.array([float(val_str)], dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
 # GAMESS log parsing
 # ---------------------------------------------------------------------------
 
@@ -373,6 +432,360 @@ def _parse_localized_orbitals(filepath, nbasis, homo_idx):
     energies_arr = np.zeros(nlocal, dtype=np.float64)
     
     return Wavefunction(coefficients, energies_arr, labels_list)
+
+
+# ---------------------------------------------------------------------------
+# Gaussian formatted checkpoint (.fchk) parsing
+# ---------------------------------------------------------------------------
+
+# Gaussian fchk angular momentum codes → our string labels
+# Negative → spherical (pure); positive/non-negative → Cartesian
+# 0=S (same either way), 1=P (Cartesian), -2=D (spherical), 2=D (Cartesian), etc.
+_FCHK_ANG_MOM_LABEL = {0: 'S', 1: 'P', 2: 'D', 3: 'F', 4: 'G'}
+
+# Number of Cartesian components per angular momentum
+_FCHK_CART_SIZE = {'S': 1, 'P': 3, 'D': 6, 'F': 10, 'G': 15}
+# Number of spherical components per angular momentum
+_FCHK_SPH_SIZE = {'S': 1, 'P': 3, 'D': 5, 'F': 7, 'G': 9}
+
+
+def parse_gaussian_fchk(filepath):
+    """Parse a Gaussian .fchk file and return atoms, BasisSet, Wavefunction.
+
+    Returns:
+        atoms: list of Atom
+        basis_set: BasisSet (Cartesian expansion for evaluation)
+        canon_wfn: Wavefunction (MO coefficients transformed to Cartesian basis)
+        local_wfn: None (localized orbitals not available in .fchk)
+        homo_idx: int (0-based index of HOMO)
+    """
+    import cclib
+
+    data = cclib.io.ccread(str(filepath))
+
+    # --- Atoms / Molecule ---
+    symbols = _symbols_from_atomnos(data.atomnos)
+    coords = data.atomcoords[0]  # (natom, 3) in Angstrom (cclib converts from Bohr)
+    atoms = []
+    for i in range(data.natom):
+        atoms.append(Atom(i, symbols[i], int(data.atomnos[i]),
+                          float(coords[i, 0]), float(coords[i, 1]), float(coords[i, 2])))
+
+    # --- Parse shells with spherical/Cartesian info ---
+    with open(filepath, 'r') as f:
+        fchk_text = f.read()
+
+    shells, nbasis_fchk, is_spherical = _parse_fchk_basis_shells(fchk_text)
+
+    # Build Cartesian BasisSet (all shells expanded to Cartesian for evaluation)
+    basis_set = BasisSet(shells, atoms)
+
+    # Build spherical function count to compute the transformation
+    nsph, ncart = _count_basis_sizes(shells, is_spherical)
+
+    if nsph != nbasis_fchk:
+        raise ValueError(
+            f"Spherical basis count mismatch: counted {nsph}, expected {nbasis_fchk}"
+        )
+
+    # --- Canonical MOs from cclib ---
+    if isinstance(data.mocoeffs, list):
+        mocoeffs_sph = np.array(data.mocoeffs[0], dtype=np.float64)
+    else:
+        mocoeffs_sph = np.array(data.mocoeffs, dtype=np.float64)
+
+    if isinstance(data.moenergies, list):
+        moenergies_arr = np.array(data.moenergies[0], dtype=np.float64)
+    else:
+        moenergies_arr = np.array(data.moenergies, dtype=np.float64)
+
+    # Build spherical→Cartesian transformation matrix and transform MO coefficients
+    T = _build_sph_to_cart_transform(shells, is_spherical)
+    # T: (nsph, ncart), C_sph: (nmo, nsph) → C_cart: (nmo, ncart)
+    mocoeffs_cart = np.dot(mocoeffs_sph, T)
+
+    homo_idx = data.homos[0]
+    canon_labels = ['canonical'] * mocoeffs_cart.shape[0]
+    canon_wfn = Wavefunction(mocoeffs_cart, moenergies_arr, canon_labels)
+
+    return atoms, basis_set, canon_wfn, None, homo_idx
+
+
+def _parse_fchk_basis_shells(fchk_text):
+    """Parse basis set shells from Gaussian fchk text.
+
+    In Gaussian fchk:
+      - Negative shell type → pure/spherical harmonics (fewer functions)
+      - Positive shell type → Cartesian functions
+      - 0 → S (same either way)
+
+    Returns:
+        shells: list of Shell namedtuples — one per contracted shell
+        nbasis_expected: int — number of basis functions according to fchk header
+        is_spherical: list of bool — True if shell uses spherical harmonics
+    """
+    shell_types = _read_fchk_array(fchk_text, 'Shell types', int)
+    nprims_per_shell = _read_fchk_array(fchk_text, 'Number of primitives per shell', int)
+    shell_to_atom = _read_fchk_array(fchk_text, 'Shell to atom map', int)
+    prim_exps = _read_fchk_array(fchk_text, 'Primitive exponents', float)
+    prim_coeffs = _read_fchk_array(fchk_text, 'Contraction coefficients', float)
+
+    nshells = len(shell_types)
+    nbasis_expected = int(_read_fchk_array(fchk_text, 'Number of basis functions', int)[0])
+
+    shells = []
+    is_spherical = []
+    prim_offset = 0
+    for ishell in range(nshells):
+        ang_code = int(shell_types[ishell])
+        # abs(code) = angular momentum L. sign indicates spherical vs Cartesian.
+        # negative → spherical (pure), non-negative → Cartesian
+        # Exception: 0 → S (always spherical since only 1 component)
+        ang_mom_abs = abs(ang_code)
+        ang_mom_label = _FCHK_ANG_MOM_LABEL.get(ang_mom_abs)
+        if ang_mom_label is None:
+            raise ValueError(f"Unsupported angular momentum L={ang_mom_abs} in shell {ishell}")
+
+        use_spherical = ang_code < 0 or ang_code == 0
+        is_spherical.append(use_spherical)
+
+        nprim = int(nprims_per_shell[ishell])
+        prims = []
+        for iprim in range(nprim):
+            exp = float(prim_exps[prim_offset + iprim])
+            coeff = float(prim_coeffs[prim_offset + iprim])
+            prims.append((exp, coeff))
+        prim_offset += nprim
+
+        atom_idx = int(shell_to_atom[ishell]) - 1  # 1-based → 0-based
+        shells.append(Shell(atom_idx, ang_mom_label, prims))
+
+    return shells, nbasis_expected, is_spherical
+
+
+def _count_basis_sizes(shells, is_spherical):
+    """Count total number of MO-coefficient (spherical side) and Cartesian basis functions."""
+    nsph = 0
+    ncart = 0
+    for shell, sph in zip(shells, is_spherical):
+        lbl = shell.ang_mom
+        if sph and lbl in _FCHK_SPH_SIZE:
+            # Spherical shells: fewer functions in MO basis
+            nsph += _FCHK_SPH_SIZE[lbl]
+        else:
+            # Cartesian (or S/P): same number in both
+            nsph += _FCHK_CART_SIZE.get(lbl, 1)
+        ncart += _FCHK_CART_SIZE.get(lbl, 1)
+    return nsph, ncart
+
+
+def _build_sph_to_cart_transform(shells, is_spherical):
+    """Build the spherical→Cartesian transformation matrix for the full basis.
+
+    For each shell, constructs the (n_sph, n_cart) block that maps Cartesian
+    basis functions to the spherical functions used by Gaussian. The MO coefficients
+    from cclib are in the spherical basis; multiplying C_sph @ T gives C_cart.
+
+    Returns:
+        T: (nsph_total, ncart_total) numpy array
+    """
+    nsph_total, ncart_total = _count_basis_sizes(shells, is_spherical)
+    T = np.zeros((nsph_total, ncart_total), dtype=np.float64)
+
+    sph_offset = 0
+    cart_offset = 0
+
+    for shell, sph in zip(shells, is_spherical):
+        lbl = shell.ang_mom
+        n_cart_shell = _FCHK_CART_SIZE.get(lbl, 1)
+        if sph and lbl in ('D', 'F'):
+            T_block = _make_shell_transform(lbl)
+            n_sph_shell = T_block.shape[0]
+            T[sph_offset:sph_offset + n_sph_shell,
+              cart_offset:cart_offset + n_cart_shell] = T_block
+            sph_offset += n_sph_shell
+        elif sph and lbl == 'S':
+            T[sph_offset, cart_offset] = 1.0
+            sph_offset += 1
+        elif sph and lbl == 'P':
+            # P shells in fchk are always Cartesian (3 spherical = 3 Cartesian)
+            T[sph_offset:sph_offset + 3, cart_offset:cart_offset + 3] = np.eye(3)
+            sph_offset += 3
+        else:
+            # Cartesian shell → Cartesian target: identity block
+            T[sph_offset:sph_offset + n_cart_shell,
+              cart_offset:cart_offset + n_cart_shell] = np.eye(n_cart_shell)
+            sph_offset += n_cart_shell
+        cart_offset += n_cart_shell
+
+    return T
+
+
+def _make_shell_transform(lbl):
+    """Return the spherical→Cartesian transformation block for one shell.
+
+    Rows: spherical functions (HORTON/Gaussian order)
+    Cols: Cartesian functions (our internal order from CARTESIAN_MAP)
+
+    Coefficients taken from HORTON's normalized transformation matrices,
+    permuted to match our Cartesian ordering.
+    """
+    if lbl == 'D':
+        # Spherical order: C₂₀, C₂₁, S₂₁, C₂₂, S₂₂
+        # Our Cartesian order: xx(0), yy(1), zz(2), xy(3), xz(4), yz(5)
+        # From HORTON (normalized):
+        #   C₂₀ = -0.5·xx -0.5·yy + zz
+        #   C₂₁ = xz
+        #   S₂₁ = yz
+        #   C₂₂ = √3/2·xx -√3/2·yy
+        #   S₂₂ = xy
+        sqrt3 = math.sqrt(3.0)
+        return np.array([
+            [-0.5,     -0.5,      1.0,  0.0,   0.0,   0.0],
+            [ 0.0,      0.0,      0.0,  0.0,   1.0,   0.0],
+            [ 0.0,      0.0,      0.0,  0.0,   0.0,   1.0],
+            [ 0.5*sqrt3, -0.5*sqrt3, 0.0, 0.0,   0.0,   0.0],
+            [ 0.0,      0.0,      0.0,  1.0,   0.0,   0.0],
+        ], dtype=np.float64)
+
+    elif lbl == 'F':
+        # Spherical order: C₃₀, C₃₁, S₃₁, C₃₂, S₃₂, C₃₃, S₃₃
+        # Our Cartesian order: xxx(0), yyy(1), zzz(2), xxy(3), xxz(4),
+        #                       xyy(5), yyz(6), xzz(7), yzz(8), xyz(9)
+        # From HORTON (normalized), permuted to our column order.
+        # HORTON col order: xxx, xxy, xxz, xyy, xyz, xzz, yyy, yyz, yzz, zzz
+        # Permutation to our order:
+        perm = [0, 6, 9, 1, 2, 3, 7, 5, 8, 4]
+        s5 = math.sqrt(5.0)
+        s6 = math.sqrt(6.0)
+        s30 = math.sqrt(30.0)
+        s3 = math.sqrt(3.0)
+        s10 = math.sqrt(10.0)
+        s2 = math.sqrt(2.0)
+        Th = np.array([
+            # C₃₀
+            [ 0.0,  0.0, -0.3*s5,  0.0,  0.0,  0.0,  0.0, -0.3*s5,  0.0,  1.0],
+            # C₃₁
+            [-0.25*s6, 0.0, 0.0, -0.05*s30, 0.0, 0.2*s30, 0.0,  0.0,  0.0,  0.0],
+            # S₃₁
+            [ 0.0, -0.05*s30, 0.0, 0.0, 0.0,  0.0, -0.25*s6, 0.0, 0.2*s30, 0.0],
+            # C₃₂
+            [ 0.0,  0.0, 0.5*s3,  0.0,  0.0,  0.0,  0.0, -0.5*s3,  0.0,  0.0],
+            # S₃₂
+            [ 0.0,  0.0,  0.0,  0.0,  1.0,  0.0,  0.0,  0.0,  0.0,  0.0],
+            # C₃₃
+            [ 0.25*s10, 0.0, 0.0, -0.75*s2, 0.0, 0.0,  0.0,  0.0,  0.0,  0.0],
+            # S₃₃
+            [ 0.0, 0.75*s2, 0.0, 0.0, 0.0,  0.0, -0.25*s10, 0.0, 0.0,  0.0],
+        ], dtype=np.float64)
+        return Th[:, perm]
+
+    else:
+        raise ValueError(f"No transformation matrix for L={lbl}")
+
+
+def _symbols_from_atomnos(atomnos):
+    """Convert atomic numbers to element symbols."""
+    _ATOMIC_SYMBOLS = {
+        1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O',
+        9: 'F', 10: 'Ne', 11: 'Na', 12: 'Mg', 13: 'Al', 14: 'Si', 15: 'P',
+        16: 'S', 17: 'Cl', 18: 'Ar', 19: 'K', 20: 'Ca', 21: 'Sc', 22: 'Ti',
+        23: 'V', 24: 'Cr', 25: 'Mn', 26: 'Fe', 27: 'Co', 28: 'Ni', 29: 'Cu',
+        30: 'Zn', 31: 'Ga', 32: 'Ge', 33: 'As', 34: 'Se', 35: 'Br', 36: 'Kr',
+        37: 'Rb', 38: 'Sr', 39: 'Y', 40: 'Zr', 41: 'Nb', 42: 'Mo', 43: 'Tc',
+        44: 'Ru', 45: 'Rh', 46: 'Pd', 47: 'Ag', 48: 'Cd', 49: 'In', 50: 'Sn',
+        51: 'Sb', 52: 'Te', 53: 'I', 54: 'Xe', 55: 'Cs', 56: 'Ba',
+        78: 'Pt', 79: 'Au', 80: 'Hg', 82: 'Pb',
+    }
+    return [_ATOMIC_SYMBOLS.get(int(z), f'Z{z}') for z in atomnos]
+
+
+# ---------------------------------------------------------------------------
+# NTO (Natural Transition Orbital) computation from fchk transition densities
+# ---------------------------------------------------------------------------
+
+def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis):
+    """Compute NTO hole/particle wavefunctions for an excited state.
+
+    Uses the "G to E trans densities" stored in the .fchk file.
+    Performs SVD of the occupied→virtual block of the MO-transformed
+    transition density matrix.
+
+    Parameters:
+        filepath: path to .fchk file
+        state_idx: 0-based excited state index
+        canon_wfn: Wavefunction with canonical MO coefficients
+        homo_idx: 0-based HOMO index
+        nbasis: number of basis functions
+
+    Returns:
+        hole_wfn: Wavefunction (hole NTOs in AO basis)
+        part_wfn: Wavefunction (particle NTOs in AO basis)
+        eigenvalues: (nocc,) array of NTO amplitudes (Σ values)
+    """
+    with open(filepath, 'r') as f:
+        fchk_text = f.read()
+
+    # Read transition density matrices (full nbf×nbf, stored contiguously)
+    g2e_all = _read_fchk_array(fchk_text, 'G to E trans densities', float)
+    if g2e_all is None:
+        raise ValueError("No 'G to E trans densities' found in .fchk file")
+
+    full_size = nbasis * nbasis
+    nmat = len(g2e_all) // full_size
+
+    # Each state has 2 matrices (alpha, beta). For triplets: T_α ≈ -T_β.
+    # Use alpha component (even index).
+    mat_idx = state_idx * 2
+    if mat_idx >= nmat:
+        raise ValueError(f"State {state_idx} not found (only {nmat//2} states)")
+
+    T_flat = g2e_all[mat_idx * full_size:(mat_idx + 1) * full_size]
+    T_ao = T_flat.reshape(nbasis, nbasis).copy()
+
+    # Get MO coefficients: cclib stores (nmo, nbasis), we need (nbasis, nmo)
+    C = np.asarray(canon_wfn.coefficients, dtype=np.float64).T  # (713, 710)
+    nmo = C.shape[1]
+    nocc = homo_idx + 1
+    nvirt = nmo - nocc
+
+    # Transform transition density to MO basis: T_MO = C^T @ T_AO @ C
+    T_mo = C.T @ T_ao @ C  # (nmo, nmo)
+
+    # Extract occupied→virtual block
+    T_ov = T_mo[:nocc, nocc:]  # (nocc, nvirt)
+
+    # SVD
+    U, sigma, Vt = np.linalg.svd(T_ov, full_matrices=False)
+    # U: (nocc, nocc), sigma: (nocc,), Vt: (nocc, nvirt)
+
+    # Build hole NTO coefficients in AO basis
+    C_occ = C[:, :nocc]  # (nbasis, nocc)
+    C_hole = C_occ @ U  # (nbasis, nocc)
+
+    # Build particle NTO coefficients in AO basis
+    C_virt = C[:, nocc:]  # (nbasis, nvirt)
+    C_part = C_virt @ Vt.T  # (nbasis, nocc) — only nocc columns from Vt
+
+    # Create Wavefunction objects (nmo=nocc for both)
+    hole_labels = [f'NTO-hole-{i+1}' for i in range(nocc)]
+    part_labels = [f'NTO-particle-{i+1}' for i in range(nocc)]
+    zero_energies = np.zeros(nocc, dtype=np.float64)
+
+    hole_wfn = Wavefunction(C_hole.T.copy(), zero_energies, hole_labels)
+    part_wfn = Wavefunction(C_part.T.copy(), zero_energies, part_labels)
+
+    return hole_wfn, part_wfn, sigma
+
+
+def get_nto_state_count(filepath):
+    """Return the number of excited states with NTO data in the .fchk file."""
+    with open(filepath, 'r') as f:
+        text = f.read()
+    nex = _read_fchk_array(text, 'Number of excited states', int)
+    if nex is None:
+        return 0
+    return int(nex[0])
 
 
 # ---------------------------------------------------------------------------
@@ -668,31 +1081,24 @@ def clear_basis_cache():
 def extract_isosurface(grid_values, isovalue, origin, spacing):
     """Extract isosurface mesh using marching cubes.
     
-    Parameters
-    ----------
-    grid_values : (nx, ny, nz) array
-    isovalue : float
-    origin : (3,) float — grid origin
-    spacing : float — grid spacing
-    
-    Returns
-    -------
-    vertices : (N, 3) array or None
-    faces : (M, 3) array or None
-    normals : (N, 3) array or None
+    Returns:
+        vertices: (N, 3) array or None
+        faces: (M, 3) array or None
     """
     from skimage import measure
     
     try:
-        verts, faces, normals, values = measure.marching_cubes(
+        result = measure.marching_cubes(
             grid_values, level=isovalue, spacing=(spacing, spacing, spacing)
         )
+        # skimage >=0.23 returns (verts, faces, normals, values)
+        verts, faces = result[0], result[1]
         # Shift vertices to world coordinates
         verts = verts + origin
-        return verts, faces, normals
+        return verts, faces
     except (ValueError, RuntimeError):
         # No surface at this isovalue
-        return None, None, None
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -1038,7 +1444,8 @@ class GridWorker(QThread):
 class MoleculeSession:
     """Holds all data for one loaded molecule. Owns its basis cache."""
     __slots__ = ('atoms', 'basis_set', 'canon_wfn', 'local_wfn',
-                 'homo_idx', 'filepath', 'bonds')
+                 'nto_hole_wfns', 'nto_part_wfns', 'nto_sigmas',
+                 'homo_idx', 'filepath', 'bonds', 'nto_state_count')
     
     def __init__(self, atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath):
         self.atoms = atoms
@@ -1048,6 +1455,43 @@ class MoleculeSession:
         self.homo_idx = homo_idx
         self.filepath = Path(filepath)
         self.bonds = detect_bonds(atoms)
+        self.nto_hole_wfns = None   # list of Wavefunction per state (lazy)
+        self.nto_part_wfns = None   # list of Wavefunction per state (lazy)
+        self.nto_sigmas = None      # list of eigenvalue arrays per state
+        self.nto_state_count = 0
+    
+    def ensure_ntos_loaded(self):
+        """Lazy-load NTOs from .fchk file if available."""
+        if self.nto_hole_wfns is not None:
+            return
+        ext = self.filepath.suffix.lower()
+        if ext != '.fchk':
+            self.nto_state_count = 0
+            self.nto_hole_wfns = []
+            self.nto_part_wfns = []
+            self.nto_sigmas = []
+            return
+        try:
+            nstates = get_nto_state_count(str(self.filepath))
+        except Exception:
+            nstates = 0
+        self.nto_state_count = nstates
+        self.nto_hole_wfns = []
+        self.nto_part_wfns = []
+        self.nto_sigmas = []
+        if nstates > 0 and self.canon_wfn is not None:
+            for s in range(nstates):
+                try:
+                    hwf, pwf, sig = compute_ntos_from_fchk(
+                        str(self.filepath), s, self.canon_wfn,
+                        self.homo_idx, self.basis_set.nbasis)
+                    self.nto_hole_wfns.append(hwf)
+                    self.nto_part_wfns.append(pwf)
+                    self.nto_sigmas.append(sig)
+                except Exception:
+                    # If one state fails, stop loading more
+                    self.nto_state_count = len(self.nto_hole_wfns)
+                    break
 
 
 # ---------------------------------------------------------------------------
@@ -1069,6 +1513,7 @@ class ViewportWidget(QWidget):
         self._current_grid_values = None
         self._current_origin = None
         self._current_spacing = None
+        self._custom_wfn = None
         self._active = False
         self._build_ui()
     
@@ -1097,12 +1542,15 @@ class ViewportWidget(QWidget):
     
     @property
     def current_wfn(self):
+        if hasattr(self, '_custom_wfn') and self._custom_wfn is not None:
+            return self._custom_wfn
         if self.wtype == 'canonical':
             return self.session.canon_wfn
         return self.session.local_wfn
     
     def set_orbital(self, mo_idx, wtype, isovalue, grid_spacing):
-        wfn = self.session.canon_wfn if wtype == 'canonical' else self.session.local_wfn
+        # Use current_wfn property (handles canonical, localized, and NTO custom)
+        wfn = self.current_wfn
         if wfn is None or mo_idx < 0 or mo_idx >= wfn.nmo:
             return
         self.mo_idx = mo_idx
@@ -1113,6 +1561,8 @@ class ViewportWidget(QWidget):
         label = f"MO {mo_idx + 1} ({wfn.labels[mo_idx]})"
         if wtype == 'canonical' and mo_idx < len(wfn.energies):
             label += f"  —  {wfn.energies[mo_idx]:+.4f} Eh"
+        elif 'nto' in wtype:
+            label = f"{wfn.labels[mo_idx]}"
         self.label.setText(label)
         self.label.setStyleSheet("background: #222; color: #fff; padding: 2px;")
         self._start_compute(wfn.get_mo(mo_idx), grid_spacing, gen)
@@ -1135,9 +1585,9 @@ class ViewportWidget(QWidget):
     def update_surface(self, isovalue):
         if self._current_grid_values is None:
             return
-        vp, fp, _ = extract_isosurface(self._current_grid_values, +isovalue,
+        vp, fp = extract_isosurface(self._current_grid_values, +isovalue,
                                         self._current_origin, self._current_spacing)
-        vn, fn, _ = extract_isosurface(self._current_grid_values, -isovalue,
+        vn, fn = extract_isosurface(self._current_grid_values, -isovalue,
                                         self._current_origin, self._current_spacing)
         self.canvas.set_orbital_surface(vp, fp, vn, fn)
     
@@ -1214,6 +1664,27 @@ class MoleculeTab(QWidget):
         self.localized_list = QListWidget()
         self.localized_list.currentRowChanged.connect(self._on_localized_selected)
         gallery_layout.addWidget(self.gallery_tabs)
+        
+        # NTO gallery (shown only for .fchk files with excited states)
+        self.nto_panel = QWidget()
+        nto_layout = QVBoxLayout(self.nto_panel)
+        nto_layout.setContentsMargins(0, 0, 0, 0)
+        nto_state_layout = QHBoxLayout()
+        nto_state_layout.addWidget(QLabel("State:"))
+        self.nto_state_combo = QComboBox()
+        self.nto_state_combo.currentIndexChanged.connect(self._on_nto_state_changed)
+        nto_state_layout.addWidget(self.nto_state_combo)
+        nto_layout.addLayout(nto_state_layout)
+        self.nto_hole_list = QListWidget()
+        self.nto_hole_list.currentRowChanged.connect(self._on_nto_hole_selected)
+        nto_layout.addWidget(QLabel("Hole NTOs (occupied→virtual):"))
+        nto_layout.addWidget(self.nto_hole_list)
+        self.nto_part_list = QListWidget()
+        self.nto_part_list.currentRowChanged.connect(self._on_nto_part_selected)
+        nto_layout.addWidget(QLabel("Particle NTOs (virtual→occupied):"))
+        nto_layout.addWidget(self.nto_part_list)
+        self.nto_panel.setVisible(False)
+        gallery_layout.addWidget(self.nto_panel)
         
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -1314,6 +1785,10 @@ class MoleculeTab(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, i)
                 self.localized_list.addItem(item)
             self.gallery_tabs.addTab(self.localized_list, "Localized")
+        
+        # NTO setup (lazy-loaded on first tab access or via state combo)
+        if self.session.filepath.suffix.lower() == '.fchk':
+            self._setup_nto_panel()
     
     def _set_viewport_count(self, n):
         for vp in self._viewports:
@@ -1368,6 +1843,8 @@ class MoleculeTab(QWidget):
     def _assign_orbital_to_active(self, mo_idx, wtype='canonical'):
         if self._active_viewport is None:
             return
+        # Clear any NTO custom wavefunction when switching to canonical/localized
+        self._active_viewport._custom_wfn = None
         self._refining[id(self._active_viewport)] = 0
         self._refine_generations[id(self._active_viewport)] = 0
         self._active_viewport.set_orbital(mo_idx, wtype, self._isovalue, self.REFINEMENT_STEPS[0])
@@ -1383,6 +1860,77 @@ class MoleculeTab(QWidget):
     def _on_localized_selected(self, row):
         if row < 0: return
         self._assign_orbital_to_active(self.localized_list.item(row).data(Qt.ItemDataRole.UserRole), 'localized')
+    
+    # --- NTO handlers ---
+    
+    def _setup_nto_panel(self):
+        """Set up NTO panel: load NTOs lazily and populate state combo."""
+        self.session.ensure_ntos_loaded()
+        nc = self.session.nto_state_count
+        if nc > 0:
+            self.nto_state_combo.blockSignals(True)
+            self.nto_state_combo.clear()
+            for s in range(nc):
+                self.nto_state_combo.addItem(f"State {s+1}")
+            self.nto_state_combo.blockSignals(False)
+            self.nto_panel.setVisible(True)
+            self._on_nto_state_changed(0)
+    
+    def _on_nto_state_changed(self, idx):
+        if idx < 0 or idx >= self.session.nto_state_count:
+            return
+        self._populate_nto_lists(idx)
+    
+    def _populate_nto_lists(self, state_idx):
+        hwfn = self.session.nto_hole_wfns[state_idx]
+        pwfn = self.session.nto_part_wfns[state_idx]
+        sigmas = self.session.nto_sigmas[state_idx]
+        
+        self.nto_hole_list.clear()
+        for i in range(hwfn.nmo):
+            lam = sigmas[i]
+            pct = lam*lam / np.sum(sigmas**2) * 100
+            item = QListWidgetItem(f"Hole {i+1}  λ={lam:.3f} ({pct:.1f}%)")
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.nto_hole_list.addItem(item)
+        
+        self.nto_part_list.clear()
+        for i in range(pwfn.nmo):
+            lam = sigmas[i]
+            pct = lam*lam / np.sum(sigmas**2) * 100
+            item = QListWidgetItem(f"Part {i+1}  λ={lam:.3f} ({pct:.1f}%)")
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.nto_part_list.addItem(item)
+    
+    def _on_nto_hole_selected(self, row):
+        if row < 0: return
+        state_idx = self.nto_state_combo.currentIndex()
+        if state_idx < 0:
+            return
+        self._assign_nto_orbital_to_active(state_idx, 'hole', row)
+    
+    def _on_nto_part_selected(self, row):
+        if row < 0: return
+        state_idx = self.nto_state_combo.currentIndex()
+        if state_idx < 0:
+            return
+        self._assign_nto_orbital_to_active(state_idx, 'particle', row)
+    
+    def _assign_nto_orbital_to_active(self, state_idx, nto_type, orb_idx):
+        """Assign an NTO to the active viewport."""
+        if self._active_viewport is None:
+            return
+        wfn = (self.session.nto_hole_wfns[state_idx] if nto_type == 'hole'
+               else self.session.nto_part_wfns[state_idx])
+        if orb_idx < 0 or orb_idx >= wfn.nmo:
+            return
+        self._refining[id(self._active_viewport)] = 0
+        self._refine_generations[id(self._active_viewport)] = 0
+        # Use a custom wtype to distinguish NTO from canonical
+        wtype = f'nto_{nto_type}_{state_idx}'
+        # Store the NTO wavefunction on the viewport so current_wfn finds it
+        self._active_viewport._custom_wfn = wfn
+        self._active_viewport.set_orbital(orb_idx, wtype, self._isovalue, self.REFINEMENT_STEPS[0])
     
     def _on_isovalue_changed(self, value):
         self._isovalue = value / 1000.0
@@ -1539,7 +2087,7 @@ class OrbitalViewer(QMainWindow):
         
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready — Open a GAMESS .log file (Ctrl+O)")
+        self.status_bar.showMessage("Ready — Open a file (Ctrl+O): GAMESS .log / Gaussian .fchk")
     
     def _build_menu(self):
         mb = self.menuBar()
@@ -1554,27 +2102,57 @@ class OrbitalViewer(QMainWindow):
         a = QAction("&Quit", self); a.setShortcut("Ctrl+Q"); a.triggered.connect(self.close); fm.addAction(a)
     
     def _file_open(self):
+        filters = (
+            "Supported Files (*.log *.out *.fchk);;"
+            "GAMESS Log (*.log *.out);;"
+            "Gaussian FChk (*.fchk);;"
+            "All Files (*)"
+        )
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open GAMESS Log", "", "GAMESS Log Files (*.log *.out);;All Files (*)")
+            self, "Open Calculation File", "", filters)
         if path:
             self._open_file(Path(path))
     
-    def _open_file(self, logpath):
-        self.status_bar.showMessage(f"Loading {logpath.name} ...")
+    def _open_file(self, filepath):
+        ext = filepath.suffix.lower()
+        if ext == '.chk':
+            QMessageBox.information(
+                self, "Binary checkpoint",
+                f"Binary .chk files cannot be parsed directly.\n\n"
+                f"Convert to formatted checkpoint first:\n"
+                f"  formchk {filepath.name} {filepath.stem}.fchk\n\n"
+                f"Then open the .fchk file."
+            )
+            return
+        
+        self.status_bar.showMessage(f"Loading {filepath.name} ...")
         QApplication.processEvents()
         try:
-            atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(logpath)
+            if ext in ('.log', '.out'):
+                atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(filepath)
+            elif ext == '.fchk':
+                atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gaussian_fchk(filepath)
+            else:
+                QMessageBox.warning(
+                    self, "Unknown format",
+                    f"Unrecognised file extension '{ext}'.\n"
+                    f"Expected: .log, .out (GAMESS) or .fchk (Gaussian)."
+                )
+                self.status_bar.showMessage("Unrecognised file format")
+                return
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             QMessageBox.critical(self, "Error", f"Failed to parse file:\n{e}")
             self.status_bar.showMessage("Error loading file")
             return
         
         clear_basis_cache()
-        session = MoleculeSession(atoms, basis_set, canon_wfn, local_wfn, homo_idx, logpath)
+        session = MoleculeSession(atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath)
         self._sessions.append(session)
         
         tab = MoleculeTab(session)
-        idx = self.tab_widget.addTab(tab, logpath.name)
+        idx = self.tab_widget.addTab(tab, filepath.name)
         self.tab_widget.setCurrentIndex(idx)
         
         self.status_bar.showMessage(
@@ -1837,7 +2415,7 @@ def cli_main():
     """Command-line mode for headless rendering."""
     parser = argparse.ArgumentParser(description='Orbital Visualizer')
     parser.add_argument('logfile', nargs='?', default='spval.log',
-                        help='GAMESS .log file to visualize')
+                        help='GAMESS .log / .out or Gaussian .fchk file to visualize')
     parser.add_argument('--orbital', type=int, default=None,
                         help='Orbital index to render (1-based)')
     parser.add_argument('--isovalue', type=float, default=0.05,
@@ -1861,7 +2439,19 @@ def cli_main():
         sys.exit(1)
     
     print(f"Parsing {args.logfile} ...")
-    atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(logpath)
+    ext = logpath.suffix.lower()
+    if ext in ('.log', '.out'):
+        atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(logpath)
+    elif ext == '.fchk':
+        atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gaussian_fchk(logpath)
+    elif ext == '.chk':
+        print("Error: binary .chk files cannot be parsed directly.")
+        print(f"  Convert first: formchk {logpath.name} {logpath.stem}.fchk")
+        sys.exit(1)
+    else:
+        print(f"Error: unrecognised file extension '{ext}'")
+        print("  Expected: .log, .out (GAMESS) or .fchk (Gaussian)")
+        sys.exit(1)
     
     print(f"  Atoms: {len(atoms)}")
     print(f"  Basis functions: {basis_set.nbasis}")
@@ -1922,8 +2512,8 @@ def cli_main():
         print(f"Exported recipe:    {recipe_path}")
         return
     
-    verts_pos, faces_pos, _ = extract_isosurface(grid_values, +args.isovalue, origin, spacing)
-    verts_neg, faces_neg, _ = extract_isosurface(grid_values, -args.isovalue, origin, spacing)
+    verts_pos, faces_pos = extract_isosurface(grid_values, +args.isovalue, origin, spacing)
+    verts_neg, faces_neg = extract_isosurface(grid_values, -args.isovalue, origin, spacing)
     
     if verts_pos is not None:
         print(f"  Positive lobe: {len(verts_pos)} vertices, {len(faces_pos)} faces")
@@ -1956,6 +2546,9 @@ def main():
     args, remaining = parser.parse_known_args()
     
     if args.cli:
+        # Forward the positional logfile as part of remaining args for cli_main()
+        if args.logfile:
+            remaining = [args.logfile] + remaining
         sys.argv = [sys.argv[0]] + remaining
         cli_main()
         return

@@ -50,7 +50,9 @@ NUMBA_NUM_THREADS=4 ./orbital-visualizer calculation.log
 | Format | Status |
 |--------|--------|
 | GAMESS `.log` | ✅ Canonical + Boys/Pipek-Mezey/Edmiston-Ruedenberg localized |
-| Other (ORCA, Gaussian, etc.) | 🔜 Adapter pattern ready, not yet implemented |
+| Gaussian `.fchk` | ✅ Canonical MOs + NTOs (from transition densities via SVD) |
+| Gaussian `.chk` | 🔜 Binary format — convert first with `formchk file.chk file.fchk` |
+| Other (ORCA, etc.) | 🔜 Adapter pattern ready, not yet implemented |
 
 ### Requirements
 
