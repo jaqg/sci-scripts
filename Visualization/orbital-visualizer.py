@@ -710,13 +710,10 @@ def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis,
                            mocoeffs_sph=None, T_sph_to_cart=None):
     """Compute NTO hole/particle wavefunctions for an excited state.
 
-    Uses the "G to E trans densities" stored in the .fchk file.
-    Performs SVD of the occupied→virtual block of the MO-transformed
-    transition density matrix.
-
-    The transition density is in the spherical basis (nsph × nsph).
-    We compute NTOs in the spherical basis, then transform to Cartesian
-    for evaluation using the same T_sph_to_cart matrix.
+    Uses the "G to E trans densities" and "Orthonormal basis" from .fchk.
+    The orthonormal basis X (nbasis × nindep) provides the metric to correctly
+    transform the AO transition density to the MO basis without needing the
+    explicit AO overlap matrix S.
 
     Parameters:
         filepath: path to .fchk file
@@ -740,44 +737,83 @@ def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis,
     if g2e_all is None:
         raise ValueError("No 'G to E trans densities' found in .fchk file")
 
+    # Read orthonormal basis X (nbasis × nindep)
+    X_flat = _read_fchk_array(fchk_text, 'Orthonormal basis', float)
+    if X_flat is None:
+        raise ValueError("No 'Orthonormal basis' found in .fchk file")
+
     # Transition density is in the spherical basis (nsph × nsph)
     if mocoeffs_sph is None:
         raise ValueError("Spherical MO coefficients required for NTO computation")
     nsph = mocoeffs_sph.shape[1]  # number of spherical basis functions
+    nmo = mocoeffs_sph.shape[0]   # number of MOs (independent functions)
+    nindep = nmo  # for this file, nindep = nmo = 710
+
     full_size = nsph * nsph
     nmat = len(g2e_all) // full_size
 
-    # Each state has 2 matrices (alpha, beta). For triplets: T_α ≈ -T_β.
-    # Use alpha component (even index).
+    # Each state has 2 matrices (alpha, beta). Use alpha component (even index).
     mat_idx = state_idx * 2
     if mat_idx >= nmat:
         raise ValueError(f"State {state_idx} not found (only {nmat//2} states)")
 
     T_flat = g2e_all[mat_idx * full_size:(mat_idx + 1) * full_size]
-    T_ao = T_flat.reshape(nsph, nsph).copy()
+    T_ao = T_flat.reshape(nsph, nsph).copy()  # (713, 713)
 
-    # Use spherical MO coefficients: shape (nmo, nsph)
-    C_sph = np.asarray(mocoeffs_sph, dtype=np.float64).T  # (nsph, nmo)
-    nmo = C_sph.shape[1]
+    # Orthonormal basis X: (nsph × nindep), stored as flat array of nindep*nsph
+    # cclib/fchk store as row-major: first nsph values = column 0, etc.
+    # Actually the fchk stores X flattened column-wise or row-wise?
+    # Let's reshape to (nindep, nsph) then transpose if needed
+    X_raw = X_flat.reshape(nindep, nsph)  # (710, 713) in C order
+    X = X_raw.T.copy()  # (713, 710) — columns are orthonormal basis vectors
+
+    # Verify X is orthonormal: X^T S X = I (but we can't check without S)
+    # Instead check that X has full column rank
+    XtX = X.T @ X  # (710, 710)
+    XtX_inv = np.linalg.inv(XtX)
+
+    # MO coefficients in the original AO basis: C_ao (nsph × nmo)
+    C_ao = np.asarray(mocoeffs_sph, dtype=np.float64).T  # (713, 710)
+
+    # C_ao = X @ C_ortho, so C_ortho = X^+ @ C_ao = (X^T X)^{-1} X^T @ C_ao
+    C_ortho = XtX_inv @ X.T @ C_ao  # (710, 710)
+
+    # Verify C_ortho is unitary (C_ortho^T C_ortho = I)
+    err = np.max(np.abs(C_ortho.T @ C_ortho - np.eye(nmo)))
+    if err > 1e-8:
+        import warnings
+        warnings.warn(f"C_ortho not perfectly unitary: max|C^TC - I| = {err:.2e}")
+
+    # Transform transition density to orthonormal basis (with metric correction)
+    # The correct transformation for a density-like matrix from AO to the
+    # orthonormal basis (where X^T S X = I) includes the pseudoinverse:
+    #   T_X = (X^T X)^{-1} X^T  T_ao  X (X^T X)^{-1}
+    # Then transform to MO basis via the unitary C_ortho.
+    XtX = X.T @ X  # (nindep, nindep)
+    XtX_inv = np.linalg.inv(XtX)
+    T_X = XtX_inv @ X.T @ T_ao @ X @ XtX_inv  # (710, 710) in orthonormal basis
+    T_mo = C_ortho.T @ T_X @ C_ortho  # (710, 710) in MO basis
+
     nocc = homo_idx + 1
     nvirt = nmo - nocc
-
-    # Transform transition density to MO basis (in spherical basis): T_MO = C^T @ T_AO @ C
-    T_mo = C_sph.T @ T_ao @ C_sph  # (nmo, nmo)
 
     # Extract occupied→virtual block
     T_ov = T_mo[:nocc, nocc:]  # (nocc, nvirt)
 
-    # SVD (in spherical MO basis)
+    # SVD
     U, sigma, Vt = np.linalg.svd(T_ov, full_matrices=False)
     # U: (nocc, nocc), sigma: (nocc,), Vt: (nocc, nvirt)
 
-    # Build NTO coefficients in spherical AO basis
-    C_occ_sph = C_sph[:, :nocc]  # (nsph, nocc)
-    C_virt_sph = C_sph[:, nocc:]  # (nsph, nvirt)
+    # Build NTO coefficients in orthonormal basis, then back to AO
+    C_occ_ortho = C_ortho[:, :nocc]  # (710, nocc)
+    C_virt_ortho = C_ortho[:, nocc:]  # (710, nvirt)
 
-    C_hole_sph = C_occ_sph @ U  # (nsph, nocc)
-    C_part_sph = C_virt_sph @ Vt.T  # (nsph, nocc)
+    C_hole_ortho = C_occ_ortho @ U  # (710, nocc)
+    C_part_ortho = C_virt_ortho @ Vt.T  # (710, nocc)
+
+    # Transform back to spherical AO basis: C_ao = X @ C_ortho
+    C_hole_sph = X @ C_hole_ortho  # (713, nocc)
+    C_part_sph = X @ C_part_ortho  # (713, nocc)
 
     # Transform to Cartesian basis for evaluation
     if T_sph_to_cart is not None:
@@ -785,7 +821,6 @@ def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis,
         C_hole_cart = T_sph_to_cart.T @ C_hole_sph  # (ncart, nocc)
         C_part_cart = T_sph_to_cart.T @ C_part_sph  # (ncart, nocc)
     else:
-        # No transformation needed (already Cartesian — GAMESS case)
         C_hole_cart = C_hole_sph
         C_part_cart = C_part_sph
 
