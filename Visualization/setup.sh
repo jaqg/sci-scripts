@@ -8,36 +8,38 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # --- System dependencies check ---
-echo "Checking system OpenGL libraries ..."
+echo "Checking system libraries ..."
 MISSING=""
+MISSING_PKG=""
 
 # Try to load OpenGL
 if ! python3 -c "import ctypes; ctypes.CDLL('libGL.so.1')" 2>/dev/null && \
    ! python3 -c "import ctypes; ctypes.CDLL('libOpenGL.so.0')" 2>/dev/null; then
-    MISSING="OpenGL"
+    MISSING="${MISSING:+$MISSING, }OpenGL"
+    MISSING_PKG="${MISSING_PKG} libgl1-mesa-glx"
 fi
 
 # Check GL dispatch library (libglvnd)
 if ! python3 -c "import ctypes; ctypes.CDLL('libEGL.so.1')" 2>/dev/null; then
     MISSING="${MISSING:+$MISSING, }EGL"
+    MISSING_PKG="${MISSING_PKG} libegl1-mesa"
+fi
+
+# Check XCB cursor (needed by Qt 6.5+ on X11)
+if ! ldconfig -p 2>/dev/null | grep -q libxcb-cursor.so; then
+    if ! python3 -c "import ctypes; ctypes.CDLL('libxcb-cursor.so.0')" 2>/dev/null; then
+        MISSING="${MISSING:+$MISSING, }xcb-cursor"
+        MISSING_PKG="${MISSING_PKG} libxcb-cursor0"
+    fi
 fi
 
 if [ -n "$MISSING" ]; then
     echo ""
     echo "WARNING: Missing system libraries: $MISSING"
-    echo "The visualizer needs GPU drivers and OpenGL libraries."
+    echo "The visualizer needs GPU drivers, OpenGL, and XCB cursor libraries."
     echo ""
     echo "Install on Ubuntu/Debian:"
-    echo "  sudo apt install libgl1-mesa-glx libegl1-mesa libglu1-mesa mesa-utils"
-    echo ""
-    echo "Install on Fedora/RHEL:"
-    echo "  sudo dnf install mesa-libGL mesa-libEGL mesa-libGLU glx-utils"
-    echo ""
-    echo "Install on Arch:"
-    echo "  sudo pacman -S mesa libglvnd glu"
-    echo ""
-    echo "Install on openSUSE:"
-    echo "  sudo zypper install Mesa-libGL1 Mesa-libEGL1 Mesa-libGLU1"
+    echo "  sudo apt install${MISSING_PKG}"
     echo ""
     echo "Continuing with Python setup anyway (will fail at runtime if missing)."
     echo ""
