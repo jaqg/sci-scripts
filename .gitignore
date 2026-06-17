@@ -18,3 +18,7 @@ TODO-edit/
 # OS
 .DS_Store
 Thumbs.db
+
+# Large Gaussian checkpoint files
+*.chk
+*.fchk
