@@ -458,6 +458,8 @@ def parse_gaussian_fchk(filepath):
         canon_wfn: Wavefunction (MO coefficients transformed to Cartesian basis)
         local_wfn: None (localized orbitals not available in .fchk)
         homo_idx: int (0-based index of HOMO)
+        mocoeffs_sph: (nmo, nsph) array — original spherical MO coeffs for NTO calc
+        T_sph_to_cart: (nsph, ncart) array — transformation matrix
     """
     import cclib
 
@@ -508,7 +510,7 @@ def parse_gaussian_fchk(filepath):
     canon_labels = ['canonical'] * mocoeffs_cart.shape[0]
     canon_wfn = Wavefunction(mocoeffs_cart, moenergies_arr, canon_labels)
 
-    return atoms, basis_set, canon_wfn, None, homo_idx
+    return atoms, basis_set, canon_wfn, None, homo_idx, mocoeffs_sph, T
 
 
 def _parse_fchk_basis_shells(fchk_text):
@@ -704,23 +706,30 @@ def _symbols_from_atomnos(atomnos):
 # NTO (Natural Transition Orbital) computation from fchk transition densities
 # ---------------------------------------------------------------------------
 
-def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis):
+def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis,
+                           mocoeffs_sph=None, T_sph_to_cart=None):
     """Compute NTO hole/particle wavefunctions for an excited state.
 
     Uses the "G to E trans densities" stored in the .fchk file.
     Performs SVD of the occupied→virtual block of the MO-transformed
     transition density matrix.
 
+    The transition density is in the spherical basis (nsph × nsph).
+    We compute NTOs in the spherical basis, then transform to Cartesian
+    for evaluation using the same T_sph_to_cart matrix.
+
     Parameters:
         filepath: path to .fchk file
         state_idx: 0-based excited state index
-        canon_wfn: Wavefunction with canonical MO coefficients
+        canon_wfn: Wavefunction with canonical MO coefficients (Cartesian basis)
         homo_idx: 0-based HOMO index
-        nbasis: number of basis functions
+        nbasis: number of Cartesian basis functions (for output verification)
+        mocoeffs_sph: (nmo, nsph) array — original spherical MO coefficients
+        T_sph_to_cart: (nsph, ncart) array — transformation matrix
 
     Returns:
-        hole_wfn: Wavefunction (hole NTOs in AO basis)
-        part_wfn: Wavefunction (particle NTOs in AO basis)
+        hole_wfn: Wavefunction (hole NTOs in Cartesian AO basis)
+        part_wfn: Wavefunction (particle NTOs in Cartesian AO basis)
         eigenvalues: (nocc,) array of NTO amplitudes (Σ values)
     """
     with open(filepath, 'r') as f:
@@ -731,7 +740,11 @@ def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis):
     if g2e_all is None:
         raise ValueError("No 'G to E trans densities' found in .fchk file")
 
-    full_size = nbasis * nbasis
+    # Transition density is in the spherical basis (nsph × nsph)
+    if mocoeffs_sph is None:
+        raise ValueError("Spherical MO coefficients required for NTO computation")
+    nsph = mocoeffs_sph.shape[1]  # number of spherical basis functions
+    full_size = nsph * nsph
     nmat = len(g2e_all) // full_size
 
     # Each state has 2 matrices (alpha, beta). For triplets: T_α ≈ -T_β.
@@ -741,39 +754,48 @@ def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis):
         raise ValueError(f"State {state_idx} not found (only {nmat//2} states)")
 
     T_flat = g2e_all[mat_idx * full_size:(mat_idx + 1) * full_size]
-    T_ao = T_flat.reshape(nbasis, nbasis).copy()
+    T_ao = T_flat.reshape(nsph, nsph).copy()
 
-    # Get MO coefficients: cclib stores (nmo, nbasis), we need (nbasis, nmo)
-    C = np.asarray(canon_wfn.coefficients, dtype=np.float64).T  # (713, 710)
-    nmo = C.shape[1]
+    # Use spherical MO coefficients: shape (nmo, nsph)
+    C_sph = np.asarray(mocoeffs_sph, dtype=np.float64).T  # (nsph, nmo)
+    nmo = C_sph.shape[1]
     nocc = homo_idx + 1
     nvirt = nmo - nocc
 
-    # Transform transition density to MO basis: T_MO = C^T @ T_AO @ C
-    T_mo = C.T @ T_ao @ C  # (nmo, nmo)
+    # Transform transition density to MO basis (in spherical basis): T_MO = C^T @ T_AO @ C
+    T_mo = C_sph.T @ T_ao @ C_sph  # (nmo, nmo)
 
     # Extract occupied→virtual block
     T_ov = T_mo[:nocc, nocc:]  # (nocc, nvirt)
 
-    # SVD
+    # SVD (in spherical MO basis)
     U, sigma, Vt = np.linalg.svd(T_ov, full_matrices=False)
     # U: (nocc, nocc), sigma: (nocc,), Vt: (nocc, nvirt)
 
-    # Build hole NTO coefficients in AO basis
-    C_occ = C[:, :nocc]  # (nbasis, nocc)
-    C_hole = C_occ @ U  # (nbasis, nocc)
+    # Build NTO coefficients in spherical AO basis
+    C_occ_sph = C_sph[:, :nocc]  # (nsph, nocc)
+    C_virt_sph = C_sph[:, nocc:]  # (nsph, nvirt)
 
-    # Build particle NTO coefficients in AO basis
-    C_virt = C[:, nocc:]  # (nbasis, nvirt)
-    C_part = C_virt @ Vt.T  # (nbasis, nocc) — only nocc columns from Vt
+    C_hole_sph = C_occ_sph @ U  # (nsph, nocc)
+    C_part_sph = C_virt_sph @ Vt.T  # (nsph, nocc)
+
+    # Transform to Cartesian basis for evaluation
+    if T_sph_to_cart is not None:
+        # T_sph_to_cart: (nsph, ncart)
+        C_hole_cart = T_sph_to_cart.T @ C_hole_sph  # (ncart, nocc)
+        C_part_cart = T_sph_to_cart.T @ C_part_sph  # (ncart, nocc)
+    else:
+        # No transformation needed (already Cartesian — GAMESS case)
+        C_hole_cart = C_hole_sph
+        C_part_cart = C_part_sph
 
     # Create Wavefunction objects (nmo=nocc for both)
     hole_labels = [f'NTO-hole-{i+1}' for i in range(nocc)]
     part_labels = [f'NTO-particle-{i+1}' for i in range(nocc)]
     zero_energies = np.zeros(nocc, dtype=np.float64)
 
-    hole_wfn = Wavefunction(C_hole.T.copy(), zero_energies, hole_labels)
-    part_wfn = Wavefunction(C_part.T.copy(), zero_energies, part_labels)
+    hole_wfn = Wavefunction(C_hole_cart.T.copy(), zero_energies, hole_labels)
+    part_wfn = Wavefunction(C_part_cart.T.copy(), zero_energies, part_labels)
 
     return hole_wfn, part_wfn, sigma
 
@@ -1445,9 +1467,11 @@ class MoleculeSession:
     """Holds all data for one loaded molecule. Owns its basis cache."""
     __slots__ = ('atoms', 'basis_set', 'canon_wfn', 'local_wfn',
                  'nto_hole_wfns', 'nto_part_wfns', 'nto_sigmas',
-                 'homo_idx', 'filepath', 'bonds', 'nto_state_count')
+                 'homo_idx', 'filepath', 'bonds', 'nto_state_count',
+                 'mocoeffs_sph', 'T_sph_to_cart')
     
-    def __init__(self, atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath):
+    def __init__(self, atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath,
+                 mocoeffs_sph=None, T_sph_to_cart=None):
         self.atoms = atoms
         self.basis_set = basis_set
         self.canon_wfn = canon_wfn
@@ -1459,6 +1483,8 @@ class MoleculeSession:
         self.nto_part_wfns = None   # list of Wavefunction per state (lazy)
         self.nto_sigmas = None      # list of eigenvalue arrays per state
         self.nto_state_count = 0
+        self.mocoeffs_sph = mocoeffs_sph    # original spherical MO coefficients (nmo, nsph)
+        self.T_sph_to_cart = T_sph_to_cart  # (nsph, ncart) transformation matrix
     
     def ensure_ntos_loaded(self):
         """Lazy-load NTOs from .fchk file if available."""
@@ -1484,7 +1510,8 @@ class MoleculeSession:
                 try:
                     hwf, pwf, sig = compute_ntos_from_fchk(
                         str(self.filepath), s, self.canon_wfn,
-                        self.homo_idx, self.basis_set.nbasis)
+                        self.homo_idx, self.basis_set.nbasis,
+                        self.mocoeffs_sph, self.T_sph_to_cart)
                     self.nto_hole_wfns.append(hwf)
                     self.nto_part_wfns.append(pwf)
                     self.nto_sigmas.append(sig)
@@ -2127,11 +2154,14 @@ class OrbitalViewer(QMainWindow):
         
         self.status_bar.showMessage(f"Loading {filepath.name} ...")
         QApplication.processEvents()
+        mocoeffs_sph = None
+        T_s2c = None
         try:
             if ext in ('.log', '.out'):
                 atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(filepath)
             elif ext == '.fchk':
-                atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gaussian_fchk(filepath)
+                atoms, basis_set, canon_wfn, local_wfn, homo_idx, mocoeffs_sph, T_s2c = \
+                    parse_gaussian_fchk(filepath)
             else:
                 QMessageBox.warning(
                     self, "Unknown format",
@@ -2148,7 +2178,8 @@ class OrbitalViewer(QMainWindow):
             return
         
         clear_basis_cache()
-        session = MoleculeSession(atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath)
+        session = MoleculeSession(atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath,
+                                 mocoeffs_sph, T_s2c)
         self._sessions.append(session)
         
         tab = MoleculeTab(session)
@@ -2443,7 +2474,7 @@ def cli_main():
     if ext in ('.log', '.out'):
         atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(logpath)
     elif ext == '.fchk':
-        atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gaussian_fchk(logpath)
+        atoms, basis_set, canon_wfn, local_wfn, homo_idx, mocoeffs_sph, T_s2c = parse_gaussian_fchk(logpath)
     elif ext == '.chk':
         print("Error: binary .chk files cannot be parsed directly.")
         print(f"  Convert first: formchk {logpath.name} {logpath.stem}.fchk")
