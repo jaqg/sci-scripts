@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Orbital Visualizer — interactive 3D molecular orbital viewer.
+Orbital Visualizer - interactive 3D molecular orbital viewer.
 Equivalent to VMD's Graphical Representations → Orbital panel.
 Usage: python orbital-visualizer.py [calculation.log]
 """
@@ -33,7 +33,7 @@ Shell = namedtuple('Shell', ['atom_idx', 'ang_mom', 'primitives'])  # primitives
 class BasisFunction:
     """One Cartesian basis function within a shell."""
     __slots__ = ('atom_idx', 'lx', 'ly', 'lz', 'angular_norm', 'shell_idx')
-    
+
     def __init__(self, atom_idx, lx, ly, lz, shell_idx):
         self.atom_idx = atom_idx
         self.lx = lx
@@ -42,7 +42,7 @@ class BasisFunction:
         self.shell_idx = shell_idx
         # Angular normalization: sqrt(lx! ly! lz! / ((2lx)! (2ly)! (2lz)!))
         self.angular_norm = self._angular_norm()
-    
+
     def _angular_norm(self):
         lx, ly, lz = self.lx, self.ly, self.lz
         num = math.factorial(lx) * math.factorial(ly) * math.factorial(lz)
@@ -52,7 +52,7 @@ class BasisFunction:
 
 class BasisSet:
     """Collection of shells and basis functions."""
-    
+
     # Cartesian expansion per angular momentum
     CARTESIAN_MAP = {
         'S': [(0, 0, 0)],                                                    # 1
@@ -66,14 +66,14 @@ class BasisSet:
               (2, 2, 0), (2, 0, 2), (0, 2, 2),
               (2, 1, 1), (1, 2, 1), (1, 1, 2)],
     }
-    
+
     def __init__(self, shells, atoms):
         self.shells = shells          # list of Shell
         self.atoms = atoms            # list of Atom
         self.nbasis = 0
         self.basis_functions = []     # list of BasisFunction
         self._expand()
-    
+
     def _expand(self):
         """Expand shells into Cartesian basis functions."""
         self.basis_functions = []
@@ -85,7 +85,7 @@ class BasisSet:
                 bf = BasisFunction(shell.atom_idx, lx, ly, lz, sidx)
                 self.basis_functions.append(bf)
         self.nbasis = len(self.basis_functions)
-    
+
     def get_lmn_array(self):
         """Return (nbasis, 3) array of (lx, ly, lz)."""
         arr = np.zeros((self.nbasis, 3), dtype=np.int32)
@@ -94,26 +94,26 @@ class BasisSet:
             arr[i, 1] = bf.ly
             arr[i, 2] = bf.lz
         return arr
-    
+
     def get_atom_idx_array(self):
         """Return (nbasis,) array of atom indices."""
         return np.array([bf.atom_idx for bf in self.basis_functions], dtype=np.int32)
-    
+
     def get_shell_idx_array(self):
         """Return (nbasis,) array of shell indices."""
         return np.array([bf.shell_idx for bf in self.basis_functions], dtype=np.int32)
-    
+
     def get_angular_norm_array(self):
         """Return (nbasis,) array of angular normalization factors."""
         return np.array([bf.angular_norm for bf in self.basis_functions], dtype=np.float64)
-    
+
     def flatten_primitives(self):
         """Return flat arrays for primitive data.
 
         Returns:
             shell_prim_start: (nshells+1,) int32
             shell_L: (nshells,) int32
-            shell_cutoff_r2: (nshells,) float64 — max cutoff distance² across primitives in shell
+            shell_cutoff_r2: (nshells,) float64 - max cutoff distance2 across primitives in shell
             prim_exp: (nprims,) float64
             prim_coeff: (nprims,) float64
             prim_radial_norm: (nprims,) float64
@@ -155,12 +155,12 @@ class BasisSet:
 
 class Wavefunction:
     """Holds MO coefficients and metadata."""
-    
+
     def __init__(self, coefficients, energies, labels=None):
         """
-        coefficients: (nmo, nbasis) array — each row is an MO
-        energies: (nmo,) array — orbital energies in Hartree
-        labels: list of str or None — 'canonical', 'boys', 'pipek-mezey', etc.
+        coefficients: (nmo, nbasis) array - each row is an MO
+        energies: (nmo,) array - orbital energies in Hartree
+        labels: list of str or None - 'canonical', 'boys', 'pipek-mezey', etc.
         """
         self.coefficients = coefficients  # (nmo, nbasis)
         self.energies = energies          # (nmo,)
@@ -169,7 +169,7 @@ class Wavefunction:
         if labels is None:
             labels = ['orbital'] * self.nmo
         self.labels = labels
-    
+
     def get_mo(self, idx):
         """Return coefficients for MO at index idx."""
         return self.coefficients[idx]
@@ -264,7 +264,7 @@ CART_LABELS_TO_LMN = {
 
 def parse_gamess_log(filepath):
     """Parse a GAMESS .log file and return Molecule, BasisSet, canonical and localized wavefunctions.
-    
+
     Returns:
         atoms: list of Atom
         basis_set: BasisSet
@@ -274,9 +274,9 @@ def parse_gamess_log(filepath):
     """
     import cclib
     from periodictable import elements
-    
+
     data = cclib.io.ccread(str(filepath))
-    
+
     # --- Atoms / Molecule ---
     symbols = [elements[z].symbol for z in data.atomnos]
     coords = data.atomcoords[0]  # (natom, 3) in Angstrom
@@ -284,7 +284,7 @@ def parse_gamess_log(filepath):
     for i in range(data.natom):
         atoms.append(Atom(i, symbols[i], int(data.atomnos[i]),
                           float(coords[i, 0]), float(coords[i, 1]), float(coords[i, 2])))
-    
+
     # --- Basis Set from cclib's gbasis ---
     shells = []
     for atom_idx, atom_shells in enumerate(data.gbasis):
@@ -292,15 +292,15 @@ def parse_gamess_log(filepath):
             # Convert primitives from list of tuples to list of (exp, coeff) floats
             prims = [(float(e), float(c)) for e, c in primitives]
             shells.append(Shell(atom_idx, ang_mom, prims))
-    
+
     basis_set = BasisSet(shells, atoms)
-    
+
     # Verify basis set size
     nbasis_expected = data.nbasis
     if basis_set.nbasis != nbasis_expected:
         raise ValueError(f"Basis function count mismatch: expanded {basis_set.nbasis}, "
                          f"expected {nbasis_expected}")
-    
+
     # --- Canonical MOs from cclib ---
     # mocoeffs is stored as list of arrays; for single-point calcs, mocoeffs[0] is (nmo, nbasis)
     mocoeffs_raw = data.mocoeffs
@@ -308,51 +308,59 @@ def parse_gamess_log(filepath):
         mocoeffs_arr = np.array(mocoeffs_raw[0], dtype=np.float64)
     else:
         mocoeffs_arr = np.array(mocoeffs_raw, dtype=np.float64)
-    
+
     moenergies_raw = data.moenergies
     if isinstance(moenergies_raw, list):
         moenergies_arr = np.array(moenergies_raw[0], dtype=np.float64)
     else:
         moenergies_arr = np.array(moenergies_raw, dtype=np.float64)
-    
+
+    # cclib may only return energies for occupied + a few virtual MOs.
+    # Pad to full MO count if needed.
+    nmo = mocoeffs_arr.shape[0]
+    if len(moenergies_arr) < nmo:
+        padded = np.full(nmo, np.nan, dtype=np.float64)
+        padded[:len(moenergies_arr)] = moenergies_arr
+        moenergies_arr = padded
+
     homo_idx = data.homos[0]  # 0-based (cclib convention for single ref)
-    canon_labels = ['canonical'] * mocoeffs_arr.shape[0]
+    canon_labels = ['canonical'] * nmo
     canon_wfn = Wavefunction(mocoeffs_arr, moenergies_arr, canon_labels)
-    
+
     # --- Localized MOs from raw text ---
     local_wfn = _parse_localized_orbitals(filepath, data.nbasis, homo_idx)
-    
+
     return atoms, basis_set, canon_wfn, local_wfn, homo_idx
 
 
 def _parse_localized_orbitals(filepath, nbasis, homo_idx):
     """Parse localized orbitals from raw GAMESS log text.
-    
+
     Returns Wavefunction or None if no localized orbitals found.
     """
     with open(filepath, 'r') as f:
         text = f.read()
-    
+
     # Try Boys first, then Pipek-Mezey, then Edmiston-Ruedenberg
     markers = [
         'THE BOYS LOCALIZED ORBITALS ARE',
         'THE PIPEK-MEZEY POPULATION LOCALIZED ORBITALS ARE',
         'EDMISTON-RUEDENBERG ENERGY LOCALIZED ORBITALS',
     ]
-    
+
     found_marker = None
     marker_pos = -1
-    
+
     for marker in markers:
         pos = text.find(marker)
         if pos != -1:
             found_marker = marker
             marker_pos = pos
             break
-    
+
     if found_marker is None:
         return None
-    
+
     # Determine label
     if 'BOYS' in found_marker:
         label = 'boys'
@@ -362,7 +370,7 @@ def _parse_localized_orbitals(filepath, nbasis, homo_idx):
         label = 'edmiston-ruedenberg'
     else:
         label = 'localized'
-    
+
     # Determine number of localized orbitals from the localization summary
     # Look for "HAS   XX ORBITALS" before the marker
     local_section = text[:marker_pos + 500]
@@ -372,47 +380,47 @@ def _parse_localized_orbitals(filepath, nbasis, homo_idx):
     else:
         # Default: number of occupied orbitals
         nlocal = homo_idx + 1
-    
+
     # Parse the coefficient blocks
     # Format: header line with MO numbers "   1          2          3          4          5"
     # Then 520 rows of "  atom_idx  symbol  shell_idx  label  coeff1  coeff2  coeff3  coeff4  coeff5"
     # No energy line
     lines = text[marker_pos:].split('\n')
-    
+
     coefficients = np.zeros((nlocal, nbasis), dtype=np.float64)
-    
+
     # Skip the marker line and find first header
     line_idx = 0
     # Skip marker line
     line_idx += 1
-    
+
     blocks_read = 0
-    
+
     while line_idx < len(lines) and blocks_read * 5 < nlocal:
         line = lines[line_idx].strip()
-        
+
         # Look for header line: just numbers "1          2          3          4          5"
         if re.match(r'^\s*\d+(\s+\d+)+$', line) and not re.search(r'[A-Za-z]', line):
             # This is a header line - parse the MO indices
             mo_nums = [int(x) for x in line.split()]
             ncols = len(mo_nums)
             line_idx += 1
-            
+
             # Now read nbasis lines of coefficients (skip blank lines)
             bf_idx = 0
             while bf_idx < nbasis and line_idx < len(lines):
                 data_line = lines[line_idx].strip()
                 line_idx += 1
-                
+
                 if not data_line:
                     continue
-                
+
                 # Parse: "idx  symbol  shell  label  c1  c2  c3  c4  c5"
                 parts = data_line.split()
                 # First 4 parts are labels, rest are coefficients
                 if len(parts) < 4 + ncols:
                     continue
-                
+
                 coeff_strs = parts[4:4 + ncols]
                 for col, coeff_str in enumerate(coeff_strs):
                     mo_global_idx = mo_nums[col] - 1  # 0-based
@@ -422,15 +430,15 @@ def _parse_localized_orbitals(filepath, nbasis, homo_idx):
                         except ValueError:
                             pass
                 bf_idx += 1
-            
+
             blocks_read += 1
         else:
             line_idx += 1
-    
+
     labels_list = [label] * nlocal
     # No energies for localized orbitals
     energies_arr = np.zeros(nlocal, dtype=np.float64)
-    
+
     return Wavefunction(coefficients, energies_arr, labels_list)
 
 
@@ -458,8 +466,8 @@ def parse_gaussian_fchk(filepath):
         canon_wfn: Wavefunction (MO coefficients transformed to Cartesian basis)
         local_wfn: None (localized orbitals not available in .fchk)
         homo_idx: int (0-based index of HOMO)
-        mocoeffs_sph: (nmo, nsph) array — original spherical MO coeffs for NTO calc
-        T_sph_to_cart: (nsph, ncart) array — transformation matrix
+        mocoeffs_sph: (nmo, nsph) array - original spherical MO coeffs for NTO calc
+        T_sph_to_cart: (nsph, ncart) array - transformation matrix
     """
     import cclib
 
@@ -522,9 +530,9 @@ def _parse_fchk_basis_shells(fchk_text):
       - 0 → S (same either way)
 
     Returns:
-        shells: list of Shell namedtuples — one per contracted shell
-        nbasis_expected: int — number of basis functions according to fchk header
-        is_spherical: list of bool — True if shell uses spherical harmonics
+        shells: list of Shell namedtuples - one per contracted shell
+        nbasis_expected: int - number of basis functions according to fchk header
+        is_spherical: list of bool - True if shell uses spherical harmonics
     """
     shell_types = _read_fchk_array(fchk_text, 'Shell types', int)
     nprims_per_shell = _read_fchk_array(fchk_text, 'Number of primitives per shell', int)
@@ -633,14 +641,14 @@ def _make_shell_transform(lbl):
     permuted to match our Cartesian ordering.
     """
     if lbl == 'D':
-        # Spherical order: C₂₀, C₂₁, S₂₁, C₂₂, S₂₂
+        # Spherical order: C20, C21, S21, C22, S22
         # Our Cartesian order: xx(0), yy(1), zz(2), xy(3), xz(4), yz(5)
         # From HORTON (normalized):
-        #   C₂₀ = -0.5·xx -0.5·yy + zz
-        #   C₂₁ = xz
-        #   S₂₁ = yz
-        #   C₂₂ = √3/2·xx -√3/2·yy
-        #   S₂₂ = xy
+        #   C20 = -0.5·xx -0.5·yy + zz
+        #   C21 = xz
+        #   S21 = yz
+        #   C22 = √3/2·xx -√3/2·yy
+        #   S22 = xy
         sqrt3 = math.sqrt(3.0)
         return np.array([
             [-0.5,     -0.5,      1.0,  0.0,   0.0,   0.0],
@@ -651,7 +659,7 @@ def _make_shell_transform(lbl):
         ], dtype=np.float64)
 
     elif lbl == 'F':
-        # Spherical order: C₃₀, C₃₁, S₃₁, C₃₂, S₃₂, C₃₃, S₃₃
+        # Spherical order: C30, C31, S31, C32, S32, C33, S33
         # Our Cartesian order: xxx(0), yyy(1), zzz(2), xxy(3), xxz(4),
         #                       xyy(5), yyz(6), xzz(7), yzz(8), xyz(9)
         # From HORTON (normalized), permuted to our column order.
@@ -665,19 +673,19 @@ def _make_shell_transform(lbl):
         s10 = math.sqrt(10.0)
         s2 = math.sqrt(2.0)
         Th = np.array([
-            # C₃₀
+            # C30
             [ 0.0,  0.0, -0.3*s5,  0.0,  0.0,  0.0,  0.0, -0.3*s5,  0.0,  1.0],
-            # C₃₁
+            # C31
             [-0.25*s6, 0.0, 0.0, -0.05*s30, 0.0, 0.2*s30, 0.0,  0.0,  0.0,  0.0],
-            # S₃₁
+            # S31
             [ 0.0, -0.05*s30, 0.0, 0.0, 0.0,  0.0, -0.25*s6, 0.0, 0.2*s30, 0.0],
-            # C₃₂
+            # C32
             [ 0.0,  0.0, 0.5*s3,  0.0,  0.0,  0.0,  0.0, -0.5*s3,  0.0,  0.0],
-            # S₃₂
+            # S32
             [ 0.0,  0.0,  0.0,  0.0,  1.0,  0.0,  0.0,  0.0,  0.0,  0.0],
-            # C₃₃
+            # C33
             [ 0.25*s10, 0.0, 0.0, -0.75*s2, 0.0, 0.0,  0.0,  0.0,  0.0,  0.0],
-            # S₃₃
+            # S33
             [ 0.0, 0.75*s2, 0.0, 0.0, 0.0,  0.0, -0.25*s10, 0.0, 0.0,  0.0],
         ], dtype=np.float64)
         return Th[:, perm]
@@ -721,8 +729,8 @@ def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis,
         canon_wfn: Wavefunction with canonical MO coefficients (Cartesian basis)
         homo_idx: 0-based HOMO index
         nbasis: number of Cartesian basis functions (for output verification)
-        mocoeffs_sph: (nmo, nsph) array — original spherical MO coefficients
-        T_sph_to_cart: (nsph, ncart) array — transformation matrix
+        mocoeffs_sph: (nmo, nsph) array - original spherical MO coefficients
+        T_sph_to_cart: (nsph, ncart) array - transformation matrix
 
     Returns:
         hole_wfn: Wavefunction (hole NTOs in Cartesian AO basis)
@@ -765,7 +773,7 @@ def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis,
     # Actually the fchk stores X flattened column-wise or row-wise?
     # Let's reshape to (nindep, nsph) then transpose if needed
     X_raw = X_flat.reshape(nindep, nsph)  # (710, 713) in C order
-    X = X_raw.T.copy()  # (713, 710) — columns are orthonormal basis vectors
+    X = X_raw.T.copy()  # (713, 710) - columns are orthonormal basis vectors
 
     # Verify X is orthonormal: X^T S X = I (but we can't check without S)
     # Instead check that X has full column rank
@@ -1115,7 +1123,7 @@ def eval_mo_on_grid(atoms, basis_set, mo_coeffs, grid_spacing=0.1, padding=4.0,
         # Project to MO
         _project_mo_kernel(out_basis, mo_coeffs_arr, out_values)
     else:
-        # Direct evaluation (no caching for fine grids — saves RAM)
+        # Direct evaluation (no caching for fine grids - saves RAM)
         _eval_mo_kernel(
             grid_points, atom_centers, basis_atom_idx, basis_shell_idx,
             basis_lx, basis_ly, basis_lz, angular_norms,
@@ -1137,13 +1145,13 @@ def clear_basis_cache():
 
 def extract_isosurface(grid_values, isovalue, origin, spacing):
     """Extract isosurface mesh using marching cubes.
-    
+
     Returns:
         vertices: (N, 3) array or None
         faces: (M, 3) array or None
     """
     from skimage import measure
-    
+
     try:
         result = measure.marching_cubes(
             grid_values, level=isovalue, spacing=(spacing, spacing, spacing)
@@ -1164,7 +1172,7 @@ def extract_isosurface(grid_values, isovalue, origin, spacing):
 
 def detect_bonds(atoms, cutoff_factor=BOND_CUTOFF_FACTOR):
     """Detect bonds between atoms based on covalent radii.
-    
+
     Returns list of (atom_idx1, atom_idx2) pairs.
     """
     bonds = []
@@ -1173,15 +1181,15 @@ def detect_bonds(atoms, cutoff_factor=BOND_CUTOFF_FACTOR):
         for j in range(i + 1, len(atoms)):
             rj = COVALENT_RADII.get(atoms[j].atomic_number, 0.7)
             cutoff = (ri + rj) * cutoff_factor
-            
+
             dx = atoms[i].x - atoms[j].x
             dy = atoms[i].y - atoms[j].y
             dz = atoms[i].z - atoms[j].z
             dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-            
+
             if dist < cutoff:
                 bonds.append((i, j))
-    
+
     return bonds
 
 
@@ -1203,42 +1211,42 @@ ATOMIC_NUMBERS = {
 
 def write_cube_file(path, atoms, grid_values, origin, spacing, mo_idx, energy, label):
     """Write a Gaussian cube file containing MO values on a grid.
-    
+
     Parameters
     ----------
-    path : Path or str — output .cube file path
+    path : Path or str - output .cube file path
     atoms : list of Atom namedtuples
-    grid_values : (nx, ny, nz) numpy array — MO values on grid
-    origin : (3,) array — grid lower-left-front corner (Å)
-    spacing : float — grid step (Å)
-    mo_idx : int — 0-based orbital index
-    energy : float or None — orbital energy in Eh
-    label : str — orbital type label ('canonical', 'localized', etc.)
-    
+    grid_values : (nx, ny, nz) numpy array - MO values on grid
+    origin : (3,) array - grid lower-left-front corner (Å)
+    spacing : float - grid step (Å)
+    mo_idx : int - 0-based orbital index
+    energy : float or None - orbital energy in Eh
+    label : str - orbital type label ('canonical', 'localized', etc.)
+
     Format: Gaussian cube (Å, indexing: x outer, y middle, z inner)
     """
     nx, ny, nz = grid_values.shape
-    
+
     with open(path, 'w') as f:
         # Comment lines
         energy_str = f"{energy:+.6f} Eh" if energy is not None else "N/A"
         f.write(f"  MO {mo_idx + 1}  {label}  {energy_str}  (units: Angstrom)\n")
         f.write(f"  Generated by Orbital Visualizer for Blender import\n")
-        
+
         # Grid dimensions and origin
         f.write(f"{len(atoms):5d}{origin[0]:12.6f}{origin[1]:12.6f}{origin[2]:12.6f}\n")
         f.write(f"{nx:5d}{spacing:12.6f}    0.000000    0.000000\n")
         f.write(f"{ny:5d}    0.000000{spacing:12.6f}    0.000000\n")
         f.write(f"{nz:5d}    0.000000    0.000000{spacing:12.6f}\n")
-        
+
         # Atom positions
         for atom in atoms:
             an = atom.atomic_number
             if an <= 0:
                 an = ATOMIC_NUMBERS.get(atom.symbol, 6)
             f.write(f"{an:5d}    0.000000{atom.x:12.6f}{atom.y:12.6f}{atom.z:12.6f}\n")
-        
-        # Grid values — 6 per line, x outer loop, y middle, z inner
+
+        # Grid values - 6 per line, x outer loop, y middle, z inner
         count = 0
         for ix in range(nx):
             for iy in range(ny):
@@ -1255,11 +1263,11 @@ import json
 
 def write_render_recipe(path, logpath, entries):
     """Write a render recipe JSON for Blender import.
-    
+
     Parameters
     ----------
-    path : Path or str — output .json file path
-    logpath : Path or str — absolute path to the source GAMESS log
+    path : Path or str - output .json file path
+    logpath : Path or str - absolute path to the source GAMESS log
     entries : list of dict with keys:
         cube_file, mo_idx, wtype, energy, label, isovalue, grid_spacing
     """
@@ -1268,7 +1276,7 @@ def write_render_recipe(path, logpath, entries):
         "source_log": str(Path(logpath).resolve()),
         "orbitals": []
     }
-    
+
     for entry in entries:
         recipe["orbitals"].append({
             "cube_file": entry["cube_file"],
@@ -1279,7 +1287,7 @@ def write_render_recipe(path, logpath, entries):
             "isovalue": entry["isovalue"],
             "grid_spacing": entry.get("grid_spacing", 0.08),
         })
-    
+
     with open(path, 'w') as f:
         json.dump(recipe, f, indent=2)
 
@@ -1294,18 +1302,18 @@ def _get_atom_color(atomic_number):
     return (rgb[0], rgb[1], rgb[2], 1.0)
 
 
-def create_sphere_mesh(center, radius=0.3, color=(0.7, 0.7, 0.7, 1.0), 
+def create_sphere_mesh(center, radius=0.3, color=(0.7, 0.7, 0.7, 1.0),
                        rows=16, cols=16):
     """Create a sphere mesh as (vertices, faces, colors)."""
     from vispy.geometry import create_sphere
-    
+
     mesh_data = create_sphere(radius=radius, rows=rows, cols=cols)
     verts = mesh_data.get_vertices() + center
     faces = mesh_data.get_faces()
-    
+
     nv = len(verts)
     colors_arr = np.tile(np.array(color), (nv, 1))
-    
+
     return verts, faces, colors_arr
 
 
@@ -1313,20 +1321,20 @@ def create_cylinder_mesh(p1, p2, radius=0.1, color=(0.7, 0.7, 0.7, 1.0),
                           rows=8, cols=8):
     """Create a cylinder mesh between two points."""
     from vispy.geometry import create_cylinder
-    
+
     # Direction and length
     direction = np.array(p2) - np.array(p1)
     length = np.linalg.norm(direction)
     if length < 1e-6:
         return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int32), np.zeros((0, 4))
-    
+
     direction = direction / length
-    
+
     # Create cylinder along Z axis
     mesh_data = create_cylinder(rows=rows, cols=cols, radius=[radius, radius], length=length)
     verts = mesh_data.get_vertices()
     faces = mesh_data.get_faces()
-    
+
     # Rotate from Z to direction
     z_axis = np.array([0.0, 0.0, 1.0])
     if np.allclose(direction, z_axis):
@@ -1339,18 +1347,18 @@ def create_cylinder_mesh(p1, p2, radius=0.1, color=(0.7, 0.7, 0.7, 1.0),
         c = np.dot(z_axis, direction)
         vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
         rot_matrix = np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s))
-    
+
     verts = verts @ rot_matrix.T + np.array(p1)
-    
+
     nv = len(verts)
     colors_arr = np.tile(np.array(color), (nv, 1))
-    
+
     return verts, faces, colors_arr
 
 
 class OrbitalCanvas:
     """Manages the 3D scene with vispy, embedded in PyQt."""
-    
+
     def __init__(self, parent=None):
         from vispy import scene
         self.canvas = scene.SceneCanvas(keys='interactive', size=(800, 600),
@@ -1358,7 +1366,7 @@ class OrbitalCanvas:
                                         parent=parent)
         self.view = self.canvas.central_widget.add_view()
         self.view.camera = scene.TurntableCamera(fov=60, distance=30)
-        
+
         self.orbital_mesh_positive = None
         self.orbital_mesh_negative = None
         self.atom_markers = []
@@ -1367,11 +1375,11 @@ class OrbitalCanvas:
         self._bonds_ref = None
         self._pos_color = (1.0, 0.2, 0.2, 0.6)
         self._neg_color = (0.2, 0.2, 1.0, 0.6)
-    
+
     @property
     def native_widget(self):
         return self.canvas.native
-    
+
     def clear_orbital(self):
         if self.orbital_mesh_positive is not None:
             self.orbital_mesh_positive.parent = None
@@ -1379,7 +1387,7 @@ class OrbitalCanvas:
         if self.orbital_mesh_negative is not None:
             self.orbital_mesh_negative.parent = None
             self.orbital_mesh_negative = None
-    
+
     def clear_all(self):
         self.clear_orbital()
         for marker in self.atom_markers:
@@ -1388,7 +1396,7 @@ class OrbitalCanvas:
         for marker in self.bond_markers:
             marker.parent = None
         self.bond_markers = []
-    
+
     def add_atoms_and_bonds(self, atoms, bonds):
         from vispy import scene
         self._atoms_ref = atoms
@@ -1411,7 +1419,7 @@ class OrbitalCanvas:
                                           vertex_colors=colors, shading='smooth',
                                           parent=self.view.scene)
                 self.bond_markers.append(mesh)
-    
+
     def set_orbital_surface(self, verts_pos, faces_pos, verts_neg, faces_neg):
         from vispy import scene
         self.clear_orbital()
@@ -1432,14 +1440,14 @@ class OrbitalCanvas:
                 parent=self.view.scene)
             self.orbital_mesh_negative.set_gl_state('translucent', depth_test=True, cull_face=False)
         self.canvas.update()
-    
+
     def set_camera_center(self, atoms=None):
         if atoms is None:
             atoms = self._atoms_ref
         if atoms is not None:
             center = np.array([[a.x, a.y, a.z] for a in atoms]).mean(axis=0)
             self.view.camera.center = center
-    
+
     def screenshot(self, filename='orbital.png'):
         img = self.canvas.render()
         from vispy.io import imsave
@@ -1471,7 +1479,7 @@ from PyQt6.QtGui import QAction
 class GridWorker(QThread):
     """Background thread for MO grid computation."""
     finished = pyqtSignal(object, object, float, int)  # grid_values, origin, spacing, mo_idx
-    
+
     def __init__(self, session, mo_coeffs, grid_spacing, mo_idx, parent=None):
         super().__init__(parent)
         self.session = session
@@ -1479,10 +1487,10 @@ class GridWorker(QThread):
         self.grid_spacing = grid_spacing
         self.mo_idx = mo_idx
         self._cancelled = False
-    
+
     def cancel(self):
         self._cancelled = True
-    
+
     def run(self):
         if self._cancelled:
             return
@@ -1504,7 +1512,7 @@ class MoleculeSession:
                  'nto_hole_wfns', 'nto_part_wfns', 'nto_sigmas',
                  'homo_idx', 'filepath', 'bonds', 'nto_state_count',
                  'mocoeffs_sph', 'T_sph_to_cart')
-    
+
     def __init__(self, atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath,
                  mocoeffs_sph=None, T_sph_to_cart=None):
         self.atoms = atoms
@@ -1520,7 +1528,7 @@ class MoleculeSession:
         self.nto_state_count = 0
         self.mocoeffs_sph = mocoeffs_sph    # original spherical MO coefficients (nmo, nsph)
         self.T_sph_to_cart = T_sph_to_cart  # (nsph, ncart) transformation matrix
-    
+
     def ensure_ntos_loaded(self):
         """Lazy-load NTOs from .fchk file if available."""
         if self.nto_hole_wfns is not None:
@@ -1564,7 +1572,7 @@ class ViewportWidget(QWidget):
     """One 3D viewport showing an orbital. Manages its own grid computation."""
     clicked = pyqtSignal(object)
     orbital_changed = pyqtSignal()
-    
+
     def __init__(self, session, parent=None):
         super().__init__(parent)
         self.session = session
@@ -1578,7 +1586,7 @@ class ViewportWidget(QWidget):
         self._custom_wfn = None
         self._active = False
         self._build_ui()
-    
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1592,16 +1600,16 @@ class ViewportWidget(QWidget):
         if self.session is not None:
             self.canvas.add_atoms_and_bonds(self.session.atoms, self.session.bonds)
             self.canvas.set_camera_center(self.session.atoms)
-    
+
     @property
     def active(self):
         return self._active
-    
+
     @active.setter
     def active(self, val):
         self._active = val
         self.setStyleSheet("border: 2px solid #4a9eff;" if val else "border: 2px solid #333;")
-    
+
     @property
     def current_wfn(self):
         if hasattr(self, '_custom_wfn') and self._custom_wfn is not None:
@@ -1609,7 +1617,7 @@ class ViewportWidget(QWidget):
         if self.wtype == 'canonical':
             return self.session.canon_wfn
         return self.session.local_wfn
-    
+
     def set_orbital(self, mo_idx, wtype, isovalue, grid_spacing):
         # Use current_wfn property (handles canonical, localized, and NTO custom)
         wfn = self.current_wfn
@@ -1622,20 +1630,20 @@ class ViewportWidget(QWidget):
         gen = self._generation
         label = f"MO {mo_idx + 1} ({wfn.labels[mo_idx]})"
         if wtype == 'canonical' and mo_idx < len(wfn.energies):
-            label += f"  —  {wfn.energies[mo_idx]:+.4f} Eh"
+            label += f"  -  {wfn.energies[mo_idx]:+.4f} Eh"
         elif 'nto' in wtype:
             label = f"{wfn.labels[mo_idx]}"
         self.label.setText(label)
         self.label.setStyleSheet("background: #222; color: #fff; padding: 2px;")
         self._start_compute(wfn.get_mo(mo_idx), grid_spacing, gen)
-    
+
     def _start_compute(self, mo_coeffs, spacing, generation):
         self._grid_worker = GridWorker(self.session, mo_coeffs, spacing, self.mo_idx)
         self._grid_worker.finished.connect(
             lambda gv, o, s, mi: self._on_grid_done(gv, o, s, mi, generation))
         self._grid_worker.finished.connect(lambda *a: self._cleanup_worker(self._grid_worker))
         self._grid_worker.start()
-    
+
     def _on_grid_done(self, grid_values, origin, spacing, mo_idx, generation):
         if generation != self._generation or mo_idx != self.mo_idx:
             return
@@ -1643,7 +1651,7 @@ class ViewportWidget(QWidget):
         self._current_origin = origin
         self._current_spacing = spacing
         self.orbital_changed.emit()
-    
+
     def update_surface(self, isovalue):
         if self._current_grid_values is None:
             return
@@ -1652,24 +1660,24 @@ class ViewportWidget(QWidget):
         vn, fn = extract_isosurface(self._current_grid_values, -isovalue,
                                         self._current_origin, self._current_spacing)
         self.canvas.set_orbital_surface(vp, fp, vn, fn)
-    
+
     def _cancel_computation(self):
         if self._grid_worker is not None:
             if self._grid_worker.isRunning():
                 self._grid_worker.cancel()
                 self._grid_worker.wait(3000)
             self._grid_worker = None
-    
+
     def _cleanup_worker(self, worker):
         if self._grid_worker is worker:
             worker.wait(500)
             if self._grid_worker is worker:
                 self._grid_worker = None
-    
+
     def shutdown(self):
         self._cancel_computation()
         self.canvas.canvas.close()
-    
+
     def get_overlay_info(self):
         lines = []
         if self.mo_idx >= 0 and self.current_wfn is not None:
@@ -1693,7 +1701,7 @@ class ViewportWidget(QWidget):
 class MoleculeTab(QWidget):
     """One tab per loaded molecule. Contains gallery, N viewports, control bar."""
     REFINEMENT_STEPS = [0.35, 0.20, 0.10]
-    
+
     def __init__(self, session, parent=None):
         super().__init__(parent)
         self.session = session
@@ -1703,19 +1711,19 @@ class MoleculeTab(QWidget):
         self._grid_spacing = 0.35
         self._refining = {}
         self._refine_generations = {}
-        
+
         self._build_ui()
         self._populate_gallery()
         self._set_viewport_count(1)
-    
+
     def _build_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         gallery_panel = QWidget()
         gallery_layout = QVBoxLayout(gallery_panel)
         gallery_layout.setContentsMargins(2, 2, 2, 2)
-        
+
         self.gallery_tabs = QTabWidget()
         self.occupied_list = QListWidget()
         self.occupied_list.currentRowChanged.connect(self._on_occupied_selected)
@@ -1726,7 +1734,7 @@ class MoleculeTab(QWidget):
         self.localized_list = QListWidget()
         self.localized_list.currentRowChanged.connect(self._on_localized_selected)
         gallery_layout.addWidget(self.gallery_tabs)
-        
+
         # NTO gallery (shown only for .fchk files with excited states)
         self.nto_panel = QWidget()
         nto_layout = QVBoxLayout(self.nto_panel)
@@ -1747,21 +1755,21 @@ class MoleculeTab(QWidget):
         nto_layout.addWidget(self.nto_part_list)
         self.nto_panel.setVisible(False)
         gallery_layout.addWidget(self.nto_panel)
-        
+
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.viewport_container = QWidget()
         self.viewport_layout = QGridLayout(self.viewport_container)
         self.viewport_layout.setContentsMargins(0, 0, 0, 0)
         self.viewport_layout.setSpacing(2)
         right_layout.addWidget(self.viewport_container, 1)
-        
+
         ctrl = QWidget()
         ctrl_layout = QHBoxLayout(ctrl)
         ctrl_layout.setContentsMargins(4, 2, 4, 2)
-        
+
         ctrl_layout.addWidget(QLabel("Isovalue:"))
         self.isovalue_slider = QSlider(Qt.Orientation.Horizontal)
         self.isovalue_slider.setRange(10, 200)
@@ -1775,7 +1783,7 @@ class MoleculeTab(QWidget):
         self.isovalue_edit.editingFinished.connect(self._on_isovalue_edited)
         self.isovalue_edit.returnPressed.connect(self._on_isovalue_edited)
         ctrl_layout.addWidget(self.isovalue_edit)
-        
+
         ctrl_layout.addSpacing(10)
         ctrl_layout.addWidget(QLabel("Grid:"))
         self.grid_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1790,32 +1798,32 @@ class MoleculeTab(QWidget):
         self.grid_edit.editingFinished.connect(self._on_grid_edited)
         self.grid_edit.returnPressed.connect(self._on_grid_edited)
         ctrl_layout.addWidget(self.grid_edit)
-        
+
         for label, sp, sv in [("Coarse", 0.35, 35), ("Medium", 0.20, 20), ("Fine", 0.10, 10)]:
             btn = QPushButton(label)
             btn.clicked.connect(lambda checked, s=sp, v=sv: self._set_grid_preset(s, v))
             ctrl_layout.addWidget(btn)
-        
+
         ctrl_layout.addStretch()
-        
+
         self.split_btn = QPushButton("Split ▸")
         self.split_btn.clicked.connect(self._toggle_split)
         ctrl_layout.addWidget(self.split_btn)
-        
+
         self.export_blender_btn = QPushButton("Export Blender")
         self.export_blender_btn.clicked.connect(self._export_to_blender)
         self.export_blender_btn.setToolTip("Export active viewport's orbital as Gaussian cube for Blender")
         ctrl_layout.addWidget(self.export_blender_btn)
-        
+
         self.homo_btn = QPushButton("HOMO")
         self.homo_btn.clicked.connect(self._go_to_homo)
         ctrl_layout.addWidget(self.homo_btn)
         self.lumo_btn = QPushButton("LUMO")
         self.lumo_btn.clicked.connect(self._go_to_lumo)
         ctrl_layout.addWidget(self.lumo_btn)
-        
+
         right_layout.addWidget(ctrl)
-        
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(gallery_panel)
         splitter.addWidget(right_panel)
@@ -1823,7 +1831,7 @@ class MoleculeTab(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([220, 980])
         main_layout.addWidget(splitter)
-    
+
     def _populate_gallery(self):
         wfn = self.session.canon_wfn
         if wfn is None:
@@ -1831,13 +1839,19 @@ class MoleculeTab(QWidget):
         self.occupied_list.clear()
         for i in range(self.session.homo_idx + 1):
             e = wfn.energies[i]
-            item = QListWidgetItem(f"MO {i+1}  ({e:+.3f} Eh)")
+            if np.isnan(e):
+                item = QListWidgetItem(f"MO {i+1}  (--- Eh)")
+            else:
+                item = QListWidgetItem(f"MO {i+1}  ({e:+.3f} Eh)")
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.occupied_list.addItem(item)
         self.virtual_list.clear()
         for i in range(self.session.homo_idx + 1, wfn.nmo):
             e = wfn.energies[i]
-            item = QListWidgetItem(f"MO {i+1}  ({e:+.3f} Eh)")
+            if np.isnan(e):
+                item = QListWidgetItem(f"MO {i+1}  (--- Eh)")
+            else:
+                item = QListWidgetItem(f"MO {i+1}  ({e:+.3f} Eh)")
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.virtual_list.addItem(item)
         if self.session.local_wfn is not None:
@@ -1847,11 +1861,11 @@ class MoleculeTab(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, i)
                 self.localized_list.addItem(item)
             self.gallery_tabs.addTab(self.localized_list, "Localized")
-        
+
         # NTO setup (lazy-loaded on first tab access or via state combo)
         if self.session.filepath.suffix.lower() == '.fchk':
             self._setup_nto_panel()
-    
+
     def _set_viewport_count(self, n):
         for vp in self._viewports:
             vp.shutdown()
@@ -1859,36 +1873,36 @@ class MoleculeTab(QWidget):
         self._viewports = []
         self._refining = {}
         self._refine_generations = {}
-        
+
         while self.viewport_layout.count():
             item = self.viewport_layout.takeAt(0)
             if item.widget():
                 item.widget().setParent(None)
-        
+
         for i in range(n):
             vp = ViewportWidget(self.session)
             vp.clicked.connect(lambda v=vp: self._activate_viewport(v))
             vp.orbital_changed.connect(lambda v=vp: self._on_viewport_updated(v))
             self._viewports.append(vp)
-        
+
         if n == 1:
             self.viewport_layout.addWidget(self._viewports[0], 0, 0)
         elif n == 2:
             self.viewport_layout.addWidget(self._viewports[0], 0, 0)
             self.viewport_layout.addWidget(self._viewports[1], 0, 1)
-        
+
         self._activate_viewport(self._viewports[-1])
         self.split_btn.setText("Split ▸" if n == 1 else "Unsplit ◂")
-    
+
     def _toggle_split(self):
         n = 2 if len(self._viewports) == 1 else 1
         self._set_viewport_count(n)
-    
+
     def _activate_viewport(self, vp):
         for v in self._viewports:
             v.active = (v is vp)
         self._active_viewport = vp
-    
+
     def _on_viewport_updated(self, vp):
         vp.update_surface(self._isovalue)
         step = self._refining.get(id(vp), 0)
@@ -1901,7 +1915,7 @@ class MoleculeTab(QWidget):
                 vp._start_compute(vp.current_wfn.get_mo(vp.mo_idx), next_sp, gen)
                 return
         self._refining[id(vp)] = 999
-    
+
     def _assign_orbital_to_active(self, mo_idx, wtype='canonical'):
         if self._active_viewport is None:
             return
@@ -1910,21 +1924,21 @@ class MoleculeTab(QWidget):
         self._refining[id(self._active_viewport)] = 0
         self._refine_generations[id(self._active_viewport)] = 0
         self._active_viewport.set_orbital(mo_idx, wtype, self._isovalue, self.REFINEMENT_STEPS[0])
-    
+
     def _on_occupied_selected(self, row):
         if row < 0: return
         self._assign_orbital_to_active(self.occupied_list.item(row).data(Qt.ItemDataRole.UserRole), 'canonical')
-    
+
     def _on_virtual_selected(self, row):
         if row < 0: return
         self._assign_orbital_to_active(self.virtual_list.item(row).data(Qt.ItemDataRole.UserRole), 'canonical')
-    
+
     def _on_localized_selected(self, row):
         if row < 0: return
         self._assign_orbital_to_active(self.localized_list.item(row).data(Qt.ItemDataRole.UserRole), 'localized')
-    
+
     # --- NTO handlers ---
-    
+
     def _setup_nto_panel(self):
         """Set up NTO panel: load NTOs lazily and populate state combo."""
         self.session.ensure_ntos_loaded()
@@ -1937,17 +1951,17 @@ class MoleculeTab(QWidget):
             self.nto_state_combo.blockSignals(False)
             self.nto_panel.setVisible(True)
             self._on_nto_state_changed(0)
-    
+
     def _on_nto_state_changed(self, idx):
         if idx < 0 or idx >= self.session.nto_state_count:
             return
         self._populate_nto_lists(idx)
-    
+
     def _populate_nto_lists(self, state_idx):
         hwfn = self.session.nto_hole_wfns[state_idx]
         pwfn = self.session.nto_part_wfns[state_idx]
         sigmas = self.session.nto_sigmas[state_idx]
-        
+
         self.nto_hole_list.clear()
         for i in range(hwfn.nmo):
             lam = sigmas[i]
@@ -1955,7 +1969,7 @@ class MoleculeTab(QWidget):
             item = QListWidgetItem(f"Hole {i+1}  λ={lam:.3f} ({pct:.1f}%)")
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.nto_hole_list.addItem(item)
-        
+
         self.nto_part_list.clear()
         for i in range(pwfn.nmo):
             lam = sigmas[i]
@@ -1963,21 +1977,21 @@ class MoleculeTab(QWidget):
             item = QListWidgetItem(f"Part {i+1}  λ={lam:.3f} ({pct:.1f}%)")
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.nto_part_list.addItem(item)
-    
+
     def _on_nto_hole_selected(self, row):
         if row < 0: return
         state_idx = self.nto_state_combo.currentIndex()
         if state_idx < 0:
             return
         self._assign_nto_orbital_to_active(state_idx, 'hole', row)
-    
+
     def _on_nto_part_selected(self, row):
         if row < 0: return
         state_idx = self.nto_state_combo.currentIndex()
         if state_idx < 0:
             return
         self._assign_nto_orbital_to_active(state_idx, 'particle', row)
-    
+
     def _assign_nto_orbital_to_active(self, state_idx, nto_type, orb_idx):
         """Assign an NTO to the active viewport."""
         if self._active_viewport is None:
@@ -1993,7 +2007,7 @@ class MoleculeTab(QWidget):
         # Store the NTO wavefunction on the viewport so current_wfn finds it
         self._active_viewport._custom_wfn = wfn
         self._active_viewport.set_orbital(orb_idx, wtype, self._isovalue, self.REFINEMENT_STEPS[0])
-    
+
     def _on_isovalue_changed(self, value):
         self._isovalue = value / 1000.0
         self.isovalue_edit.blockSignals(True)
@@ -2002,7 +2016,7 @@ class MoleculeTab(QWidget):
         for vp in self._viewports:
             if vp._current_grid_values is not None:
                 vp.update_surface(self._isovalue)
-    
+
     def _on_isovalue_edited(self):
         """Handle manual isovalue input."""
         try:
@@ -2019,7 +2033,7 @@ class MoleculeTab(QWidget):
                 self.isovalue_edit.setText(f"{self._isovalue:.3f}")
         except ValueError:
             self.isovalue_edit.setText(f"{self._isovalue:.3f}")
-    
+
     def _on_grid_changed(self, value):
         self._grid_spacing = value / 100.0
         self.grid_edit.blockSignals(True)
@@ -2032,7 +2046,7 @@ class MoleculeTab(QWidget):
                 vp._cancel_computation()
                 vp._generation += 1
                 vp._start_compute(vp.current_wfn.get_mo(vp.mo_idx), self._grid_spacing, vp._generation)
-    
+
     def _on_grid_edited(self):
         """Handle manual grid spacing input."""
         try:
@@ -2046,56 +2060,56 @@ class MoleculeTab(QWidget):
                 self.grid_edit.setText(f"{self._grid_spacing:.2f}")
         except ValueError:
             self.grid_edit.setText(f"{self._grid_spacing:.2f}")
-    
+
     def _set_grid_preset(self, spacing, slider_value):
         self.grid_slider.setValue(slider_value)
-    
+
     def _go_to_homo(self):
         self.gallery_tabs.setCurrentIndex(0)
         self.occupied_list.setCurrentRow(self.session.homo_idx)
-    
+
     def _go_to_lumo(self):
         self.gallery_tabs.setCurrentIndex(1)
         self.virtual_list.setCurrentRow(0)
-    
+
     def _export_to_blender(self):
         """Export the active viewport's current orbital as a Gaussian cube + recipe JSON."""
         from PyQt6.QtWidgets import QFileDialog
-        
+
         vp = self._active_viewport
         if vp is None or vp.mo_idx < 0 or vp._current_grid_values is None:
-            QMessageBox.warning(self, "No Orbital", 
+            QMessageBox.warning(self, "No Orbital",
                                 "Select an orbital first (click in gallery).")
             return
-        
+
         dirpath = QFileDialog.getExistingDirectory(
             self, "Select export directory", "",
             QFileDialog.Option.ShowDirsOnly)
         if not dirpath:
             return
-        
+
         dirpath = Path(dirpath)
         try:
             dirpath.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             QMessageBox.critical(self, "Error", f"Cannot create directory:\n{e}")
             return
-        
+
         self._write_blender_export(dirpath, vp)
-    
+
     def _write_blender_export(self, dirpath, vp):
         """Write cube file and recipe for a single viewport's orbital."""
         wfn = vp.current_wfn
         energy = wfn.energies[vp.mo_idx] if vp.wtype == 'canonical' and vp.mo_idx < len(wfn.energies) else 0.0
         label = wfn.labels[vp.mo_idx] if vp.mo_idx < len(wfn.labels) else 'orbital'
-        
+
         cube_name = f"mo_{vp.mo_idx + 1}_{vp.wtype}.cube"
         cube_path = dirpath / cube_name
-        
+
         write_cube_file(cube_path, self.session.atoms, vp._current_grid_values,
                         vp._current_origin, vp._current_spacing,
                         vp.mo_idx, energy, label)
-        
+
         recipe_path = dirpath / "render_recipe.json"
         write_render_recipe(recipe_path, self.session.filepath, [{
             "cube_file": cube_name,
@@ -2106,11 +2120,11 @@ class MoleculeTab(QWidget):
             "isovalue": self._isovalue,
             "grid_spacing": vp._current_spacing,
         }])
-        
+
         from PyQt6.QtWidgets import QApplication
         QApplication.instance().activeWindow().statusBar().showMessage(
             f"Exported {cube_name} to {dirpath}")
-    
+
     def shutdown(self):
         for vp in self._viewports:
             vp.shutdown()
@@ -2122,35 +2136,35 @@ class MoleculeTab(QWidget):
 
 class OrbitalViewer(QMainWindow):
     """Main application window with tabbed molecules and split viewports."""
-    
+
     def __init__(self, logpath=None):
         super().__init__()
         self.setWindowTitle("Orbital Visualizer")
         self.resize(1200, 800)
         self._sessions = []
-        
+
         self._build_ui()
         self._build_menu()
-        
+
         if logpath is not None:
             self._open_file(Path(logpath))
-    
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(4, 4, 4, 4)
-        
+
         self.tab_widget = QTabWidget()
         self.tab_widget.setTabsClosable(True)
         self.tab_widget.tabCloseRequested.connect(self._close_tab)
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tab_widget)
-        
+
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready — Open a file (Ctrl+O): GAMESS .log / Gaussian .fchk")
-    
+        self.status_bar.showMessage("Ready - Open a file (Ctrl+O): GAMESS .log / Gaussian .fchk")
+
     def _build_menu(self):
         mb = self.menuBar()
         fm = mb.addMenu("&File")
@@ -2162,7 +2176,7 @@ class OrbitalViewer(QMainWindow):
         fm.addSeparator()
         a = QAction("&Close Tab", self); a.setShortcut("Ctrl+W"); a.triggered.connect(lambda: self._close_tab(self.tab_widget.currentIndex())); fm.addAction(a)
         a = QAction("&Quit", self); a.setShortcut("Ctrl+Q"); a.triggered.connect(self.close); fm.addAction(a)
-    
+
     def _file_open(self):
         filters = (
             "Supported Files (*.log *.out *.fchk);;"
@@ -2174,7 +2188,7 @@ class OrbitalViewer(QMainWindow):
             self, "Open Calculation File", "", filters)
         if path:
             self._open_file(Path(path))
-    
+
     def _open_file(self, filepath):
         ext = filepath.suffix.lower()
         if ext == '.chk':
@@ -2186,7 +2200,7 @@ class OrbitalViewer(QMainWindow):
                 f"Then open the .fchk file."
             )
             return
-        
+
         self.status_bar.showMessage(f"Loading {filepath.name} ...")
         QApplication.processEvents()
         mocoeffs_sph = None
@@ -2211,24 +2225,24 @@ class OrbitalViewer(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to parse file:\n{e}")
             self.status_bar.showMessage("Error loading file")
             return
-        
+
         clear_basis_cache()
         session = MoleculeSession(atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath,
                                  mocoeffs_sph, T_s2c)
         self._sessions.append(session)
-        
+
         tab = MoleculeTab(session)
         idx = self.tab_widget.addTab(tab, filepath.name)
         self.tab_widget.setCurrentIndex(idx)
-        
+
         self.status_bar.showMessage(
             f"Loaded: {len(atoms)} atoms, {basis_set.nbasis} bf, "
             f"{canon_wfn.nmo} MOs, HOMO={homo_idx + 1}")
-        
+
         # Pre-warm: auto-load HOMO so JIT compilation happens now,
         # not on first user click. GridWorker runs in background thread.
         tab._go_to_homo()
-    
+
     def _close_tab(self, index):
         if index < 0 or index >= len(self._sessions):
             return
@@ -2237,34 +2251,34 @@ class OrbitalViewer(QMainWindow):
             tab.shutdown()
         self.tab_widget.removeTab(index)
         del self._sessions[index]
-    
+
     def _on_tab_changed(self, index):
         if index >= 0 and index < len(self._sessions):
             session = self._sessions[index]
-            self.setWindowTitle(f"Orbital Visualizer — {session.filepath.name}")
-    
+            self.setWindowTitle(f"Orbital Visualizer - {session.filepath.name}")
+
     def _file_export(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Image", "orbital.png", "PNG Images (*.png);;All Files (*)")
         if path:
             self._export_with_overlay(path)
             self.status_bar.showMessage(f"Saved: {path}")
-    
+
     def _export_with_overlay(self, path):
         from PyQt6.QtGui import QImage, QPainter, QColor, QFont
-        
+
         tab = self.tab_widget.currentWidget()
         if tab is None or not hasattr(tab, '_active_viewport'):
             return
         vp = tab._active_viewport
         if vp is None:
             return
-        
+
         img_array = vp.canvas.canvas.render()
         h, w = img_array.shape[:2]
         img_8bit = (np.clip(img_array, 0, 1) * 255).astype(np.uint8)
         qimg = QImage(img_8bit.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
-        
+
         lines = vp.get_overlay_info()
         lines.append(f"Isovalue: ±{tab._isovalue:.3f}")
         if vp._current_spacing is not None:
@@ -2272,23 +2286,23 @@ class OrbitalViewer(QMainWindow):
         if self._sessions:
             s = self._sessions[self.tab_widget.currentIndex()]
             lines.insert(0, f"{s.filepath.name}")
-        
+
         if not lines:
             qimg.save(path, 'PNG')
             return
-        
+
         painter = QPainter(qimg)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         font = QFont("monospace", 12)
         font.setBold(True)
         painter.setFont(font)
-        
+
         pad = 8
         lh = 20
         bh = len(lines) * lh + pad * 2
         metrics = painter.fontMetrics()
         bw = max(metrics.horizontalAdvance(l) for l in lines) + pad * 2
-        
+
         painter.fillRect(0, 0, bw, bh, QColor(0, 0, 0, 180))
         painter.setPen(QColor(255, 255, 255, 255))
         y = pad + metrics.ascent()
@@ -2297,19 +2311,19 @@ class OrbitalViewer(QMainWindow):
             y += lh
         painter.end()
         qimg.save(path, 'PNG')
-    
+
     def _export_blender_multi(self):
         """Open dialog to select multiple orbitals and export as cube files + recipe."""
         tab = self.tab_widget.currentWidget()
         if tab is None or not hasattr(tab, 'session'):
             QMessageBox.warning(self, "No Molecule", "Open a molecule first.")
             return
-        
+
         session = tab.session
         wfn = session.canon_wfn
         if wfn is None:
             return
-        
+
         dirpath = QFileDialog.getExistingDirectory(
             self, "Select export directory", "",
             QFileDialog.Option.ShowDirsOnly)
@@ -2321,19 +2335,19 @@ class OrbitalViewer(QMainWindow):
         except OSError as e:
             QMessageBox.critical(self, "Error", f"Cannot create directory:\n{e}")
             return
-        
+
         # Build selection dialog
         dlg = QDialog(self)
         dlg.setWindowTitle("Select Orbitals for Blender Export")
         dlg.resize(500, 400)
         dlg_layout = QVBoxLayout(dlg)
-        
+
         dlg_layout.addWidget(QLabel("Select orbitals to export:"))
-        
+
         tree = QTreeWidget()
         tree.setHeaderLabels(["Orbital", "Energy (Eh)", "Type"])
         tree.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        
+
         # Canonical orbitals
         canon_root = QTreeWidgetItem(tree, [f"Canonical ({wfn.nmo} MOs)", "", ""])
         canon_root.setFlags(canon_root.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
@@ -2349,7 +2363,7 @@ class OrbitalViewer(QMainWindow):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked)
         canon_root.setExpanded(True)
-        
+
         # Localized orbitals
         if session.local_wfn is not None:
             local_wfn = session.local_wfn
@@ -2366,9 +2380,9 @@ class OrbitalViewer(QMainWindow):
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.CheckState.Unchecked)
             local_root.setExpanded(True)
-        
+
         dlg_layout.addWidget(tree)
-        
+
         # Grid spacing selector
         grid_layout = QHBoxLayout()
         grid_layout.addWidget(QLabel("Grid spacing:"))
@@ -2378,7 +2392,7 @@ class OrbitalViewer(QMainWindow):
         grid_layout.addWidget(grid_combo)
         grid_layout.addStretch()
         dlg_layout.addLayout(grid_layout)
-        
+
         # Isovalue
         iso_layout = QHBoxLayout()
         iso_layout.addWidget(QLabel("Isovalue (for recipe only):"))
@@ -2390,7 +2404,7 @@ class OrbitalViewer(QMainWindow):
         iso_layout.addWidget(iso_spin)
         iso_layout.addStretch()
         dlg_layout.addLayout(iso_layout)
-        
+
         # Buttons
         btn_layout = QHBoxLayout()
         cancel_btn = QPushButton("Cancel")
@@ -2401,12 +2415,12 @@ class OrbitalViewer(QMainWindow):
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(export_btn)
         dlg_layout.addLayout(btn_layout)
-        
+
         def do_export():
             spacing_str = grid_combo.currentText()
             spacing = float(spacing_str.split()[0])
             isovalue = iso_spin.value()
-            
+
             entries = []
             # Collect checked items
             for i in range(canon_root.childCount()):
@@ -2415,38 +2429,38 @@ class OrbitalViewer(QMainWindow):
                     mo_idx = child.data(0, Qt.ItemDataRole.UserRole)
                     energy = wfn.energies[mo_idx] if mo_idx < len(wfn.energies) else 0.0
                     entries.append((mo_idx, "canonical", energy, wfn.labels[mo_idx]))
-            
+
             if hasattr(session, 'local_wfn') and session.local_wfn is not None:
                 for i in range(local_root.childCount()):
                     child = local_root.child(i)
                     if child.checkState(0) == Qt.CheckState.Checked:
                         mo_idx = child.data(0, Qt.ItemDataRole.UserRole)
                         entries.append((mo_idx, "localized", 0.0, "localized"))
-            
+
             if not entries:
                 QMessageBox.warning(dlg, "No Selection", "Check at least one orbital.")
                 return
-            
+
             dlg.accept()
-            
+
             self.status_bar.showMessage(f"Exporting {len(entries)} orbitals...")
             QApplication.processEvents()
-            
+
             recipe_entries = []
             for mo_idx, wtype, energy, label in entries:
                 target_wfn = session.canon_wfn if wtype == "canonical" else session.local_wfn
                 mo_coeffs = target_wfn.get_mo(mo_idx)
-                
+
                 grid_values, origin, grid_sp = eval_mo_on_grid(
                     session.atoms, session.basis_set, mo_coeffs,
                     grid_spacing=spacing, padding=5.0
                 )
-                
+
                 cube_name = f"mo_{mo_idx + 1}_{wtype}.cube"
                 cube_path = dirpath / cube_name
                 write_cube_file(cube_path, session.atoms, grid_values, origin,
                                grid_sp, mo_idx, energy, label)
-                
+
                 recipe_entries.append({
                     "cube_file": cube_name,
                     "mo_idx": mo_idx,
@@ -2456,14 +2470,14 @@ class OrbitalViewer(QMainWindow):
                     "isovalue": isovalue,
                     "grid_spacing": grid_sp,
                 })
-            
+
             write_render_recipe(dirpath / "render_recipe.json", session.filepath, recipe_entries)
             self.status_bar.showMessage(
                 f"Exported {len(entries)} orbitals to {dirpath}")
-        
+
         export_btn.clicked.connect(do_export)
         dlg.exec()
-    
+
     def closeEvent(self, event):
         for i in range(self.tab_widget.count()):
             tab = self.tab_widget.widget(i)
@@ -2498,12 +2512,12 @@ def cli_main():
     parser.add_argument('--cli', action='store_true', default=True,
                         help='Run in CLI mode (default when --output given)')
     args = parser.parse_args()
-    
+
     logpath = Path(args.logfile)
     if not logpath.exists():
         print(f"Error: file not found: {args.logfile}")
         sys.exit(1)
-    
+
     print(f"Parsing {args.logfile} ...")
     ext = logpath.suffix.lower()
     if ext in ('.log', '.out'):
@@ -2518,19 +2532,19 @@ def cli_main():
         print(f"Error: unrecognised file extension '{ext}'")
         print("  Expected: .log, .out (GAMESS) or .fchk (Gaussian)")
         sys.exit(1)
-    
+
     print(f"  Atoms: {len(atoms)}")
     print(f"  Basis functions: {basis_set.nbasis}")
     print(f"  Canonical MOs: {canon_wfn.nmo}")
     print(f"  HOMO index (0-based): {homo_idx}")
     if local_wfn:
         print(f"  Localized MOs: {local_wfn.nmo}")
-    
+
     if args.type == 'localized' and local_wfn is not None:
         wfn = local_wfn
     else:
         wfn = canon_wfn
-    
+
     if args.orbital is not None:
         mo_idx = args.orbital - 1
         if mo_idx < 0 or mo_idx >= wfn.nmo:
@@ -2538,31 +2552,31 @@ def cli_main():
             sys.exit(1)
     else:
         mo_idx = homo_idx
-    
+
     print(f"\nEvaluating orbital {mo_idx + 1} ({wfn.labels[mo_idx]}) "
           f"on {args.grid:.2f} Å grid ...")
-    
+
     mo_coeffs = wfn.get_mo(mo_idx)
     grid_values, origin, spacing = eval_mo_on_grid(
         atoms, basis_set, mo_coeffs, grid_spacing=args.grid
     )
-    
+
     print(f"  Grid shape: {grid_values.shape}")
     print(f"  Value range: [{grid_values.min():.6f}, {grid_values.max():.6f}]")
-    
+
     if args.export_cube is not None:
         # Export cube file + recipe JSON, skip rendering
         dirpath = Path(args.export_cube)
         dirpath.mkdir(parents=True, exist_ok=True)
-        
+
         energy = wfn.energies[mo_idx] if mo_idx < len(wfn.energies) else 0.0
         label = wfn.labels[mo_idx] if mo_idx < len(wfn.labels) else 'orbital'
-        
+
         cube_name = f"mo_{mo_idx + 1}_{args.type}.cube"
         cube_path = dirpath / cube_name
         write_cube_file(cube_path, atoms, grid_values, origin, spacing,
                        mo_idx, energy, label)
-        
+
         recipe_path = dirpath / "render_recipe.json"
         write_render_recipe(recipe_path, logpath, [{
             "cube_file": cube_name,
@@ -2573,26 +2587,26 @@ def cli_main():
             "isovalue": args.isovalue,
             "grid_spacing": spacing,
         }])
-        
+
         print(f"Exported cube file: {cube_path}")
         print(f"Exported recipe:    {recipe_path}")
         return
-    
+
     verts_pos, faces_pos = extract_isosurface(grid_values, +args.isovalue, origin, spacing)
     verts_neg, faces_neg = extract_isosurface(grid_values, -args.isovalue, origin, spacing)
-    
+
     if verts_pos is not None:
         print(f"  Positive lobe: {len(verts_pos)} vertices, {len(faces_pos)} faces")
     if verts_neg is not None:
         print(f"  Negative lobe: {len(verts_neg)} vertices, {len(faces_neg)} faces")
-    
+
     print(f"\nRendering ...")
     canvas = OrbitalCanvas()
     bonds = detect_bonds(atoms)
     canvas.add_atoms_and_bonds(atoms, bonds)
     canvas.set_orbital_surface(verts_pos, faces_pos, verts_neg, faces_neg)
     canvas.set_camera_center(atoms)
-    
+
     print(f"  Saving to {args.output} ...")
     from vispy import app
     canvas.canvas.show()
@@ -2610,7 +2624,7 @@ def main():
     parser.add_argument('--cli', action='store_true', default=False,
                         help='Run in command-line mode (render to PNG)')
     args, remaining = parser.parse_known_args()
-    
+
     if args.cli:
         # Forward the positional logfile as part of remaining args for cli_main()
         if args.logfile:
@@ -2618,22 +2632,22 @@ def main():
         sys.argv = [sys.argv[0]] + remaining
         cli_main()
         return
-    
+
     # GUI mode: initialize vispy with PyQt6 backend before creating canvas
     from vispy.app import use_app
     use_app('pyqt6')
-    
+
     # Check OpenGL availability before creating any widgets
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
     from PyQt6.QtGui import QOpenGLContext, QSurfaceFormat
-    
+
     # Request OpenGL 3.3 core profile (available on Mesa 10+, any distro from 2015+)
     fmt = QSurfaceFormat()
     fmt.setVersion(3, 3)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     QSurfaceFormat.setDefaultFormat(fmt)
-    
+
     # Quick smoke test: create temporary GL context
     temp_ctx = QOpenGLContext()
     if not temp_ctx.create():
@@ -2650,12 +2664,12 @@ def main():
         )
         sys.exit(1)
     del temp_ctx
-    
+
     app.setApplicationName("Orbital Visualizer")
-    
+
     viewer = OrbitalViewer(logpath=args.logfile)
     viewer.show()
-    
+
     sys.exit(app.exec())
 
 
