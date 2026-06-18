@@ -347,65 +347,6 @@ def parse_gamess_log(filepath):
     return atoms, basis_set, canon_wfn, local_wfn, homo_idx
 
 
-def _detect_ispher1(filepath):
-    """Check if GAMESS log used ISPHER=1 (spherical harmonics)."""
-    with open(filepath, 'r') as f:
-        for line in f:
-            if 'ISPHER' in line.upper():
-                # Check for ispher=1
-                if re.search(r'ISPHER\s*=\s*1\b', line, re.IGNORECASE):
-                    return True
-            # Also check for the spherical harmonics note
-            if 'VARIATIONAL SPACE WILL BE RESTRICTED TO PURE SPHERICAL HARMONICS' in line.upper():
-                return True
-            # Stop searching after reading enough lines (ispher is near the top)
-            if 'MOLECULAR ORBITALS' in line.upper() or 'EIGENVECTORS' in line.upper():
-                break
-    return False
-
-
-def _apply_sph_to_cart_gamess(mocoeffs, shells, basis_set):
-    """Apply spherical→Cartesian correction to MO coefficients from GAMESS.
-
-    When ISPHER=1, GAMESS uses spherical-harmonic basis functions internally
-    but prints MO coefficients in the Cartesian AO basis. The printed coefficients
-    need to be corrected for the different normalization conventions between
-    GAMESS's spherical-in-Cartesian-disguise and our true Cartesian basis.
-
-    For each D (L=2) and F (L=3) shell, the 6 (or 10) printed coefficients
-    are transformed to the true Cartesian representation.
-    """
-    nmo = mocoeffs.shape[0]
-    result = mocoeffs.copy()
-
-    # Build mapping from shell index to basis function range
-    bf_offset = 0
-    for sidx, shell in enumerate(shells):
-        lbl = shell.ang_mom
-        ncart = len(BasisSet.CARTESIAN_MAP[lbl])
-        bf_range = (bf_offset, bf_offset + ncart)
-        bf_offset += ncart
-
-        if lbl == 'D':
-            T_block = _make_shell_transform('D')  # (5, 6)
-            # Pseudoinverse: (6, 5), maps 6 cart -> 5 sph
-            T_pinv = np.linalg.lstsq(T_block, np.eye(5), rcond=None)[0]  # (6, 5)
-            M = T_pinv @ T_block  # (6, 6) projector
-            for i in range(nmo):
-                result[i, bf_range[0]:bf_range[1]] = \
-                    result[i, bf_range[0]:bf_range[1]] @ M
-
-        elif lbl == 'F':
-            T_block = _make_shell_transform('F')  # (7, 10)
-            T_pinv = np.linalg.lstsq(T_block, np.eye(7), rcond=None)[0]  # (10, 7)
-            M = T_pinv @ T_block  # (10, 10) projector
-            for i in range(nmo):
-                result[i, bf_range[0]:bf_range[1]] = \
-                    result[i, bf_range[0]:bf_range[1]] @ M
-
-    return result
-
-
 def _parse_localized_orbitals(filepath, nbasis, homo_idx):
     """Parse localized orbitals from raw GAMESS log text.
 
