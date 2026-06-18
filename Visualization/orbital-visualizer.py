@@ -235,6 +235,36 @@ def _read_fchk_array(text, field_name, dtype):
 
 
 # ---------------------------------------------------------------------------
+# Format auto-detection
+# ---------------------------------------------------------------------------
+
+def _detect_format(filepath):
+    """Detect quantum chemistry code from file content.
+
+    Returns 'gamess', 'gaussian', or None if unknown.
+    """
+    ext = Path(filepath).suffix.lower()
+    if ext == '.fchk':
+        return 'gaussian'
+    if ext == '.chk':
+        return None  # handled specially by caller
+
+    # Scan first lines for telltale markers
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        for i, line in enumerate(f):
+            if i > 200:
+                break
+            upper = line.upper()
+            if 'GAMESS' in upper:
+                return 'gamess'
+            if 'GAUSSIAN' in upper or 'ENTERING GAUSSIAN SYSTEM' in upper:
+                return 'gaussian'
+            if 'GAUSSIAN, INC' in upper or 'GAUSSIAN INC' in upper:
+                return 'gaussian'
+    return None
+
+
+# ---------------------------------------------------------------------------
 # GAMESS log parsing
 # ---------------------------------------------------------------------------
 
@@ -2194,7 +2224,7 @@ class OrbitalViewer(QMainWindow):
     def _file_open(self):
         filters = (
             "Supported Files (*.log *.out *.fchk);;"
-            "GAMESS Log (*.log *.out);;"
+            "GAMESS / Gaussian Log (*.log *.out);;"
             "Gaussian FChk (*.fchk);;"
             "All Files (*)"
         )
@@ -2220,16 +2250,25 @@ class OrbitalViewer(QMainWindow):
         mocoeffs_sph = None
         T_s2c = None
         try:
-            if ext in ('.log', '.out'):
+            code = _detect_format(filepath)
+            if code == 'gamess':
                 atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(filepath)
-            elif ext == '.fchk':
+            elif code == 'gaussian':
                 atoms, basis_set, canon_wfn, local_wfn, homo_idx, mocoeffs_sph, T_s2c = \
                     parse_gaussian_fchk(filepath)
+            elif ext == '.chk':
+                QMessageBox.warning(
+                    self, "Binary checkpoint",
+                    f"Binary .chk files cannot be parsed directly.\n"
+                    f"Convert first with: formchk {filepath.name} {filepath.stem}.fchk"
+                )
+                self.status_bar.showMessage("Cannot parse binary .chk")
+                return
             else:
                 QMessageBox.warning(
                     self, "Unknown format",
-                    f"Unrecognised file extension '{ext}'.\n"
-                    f"Expected: .log, .out (GAMESS) or .fchk (Gaussian)."
+                    f"Could not detect format for '{filepath.name}'.\n"
+                    f"Supported: GAMESS .log/.out, Gaussian .fchk/.log"
                 )
                 self.status_bar.showMessage("Unrecognised file format")
                 return
@@ -2533,18 +2572,18 @@ def cli_main():
         sys.exit(1)
 
     print(f"Parsing {args.logfile} ...")
-    ext = logpath.suffix.lower()
-    if ext in ('.log', '.out'):
+    code = _detect_format(logpath)
+    if code == 'gamess':
         atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(logpath)
-    elif ext == '.fchk':
+    elif code == 'gaussian':
         atoms, basis_set, canon_wfn, local_wfn, homo_idx, mocoeffs_sph, T_s2c = parse_gaussian_fchk(logpath)
-    elif ext == '.chk':
+    elif logpath.suffix.lower() == '.chk':
         print("Error: binary .chk files cannot be parsed directly.")
         print(f"  Convert first: formchk {logpath.name} {logpath.stem}.fchk")
         sys.exit(1)
     else:
-        print(f"Error: unrecognised file extension '{ext}'")
-        print("  Expected: .log, .out (GAMESS) or .fchk (Gaussian)")
+        print(f"Error: could not detect format for '{logpath.name}'.")
+        print("  Supported: GAMESS .log/.out, Gaussian .fchk/.log")
         sys.exit(1)
 
     print(f"  Atoms: {len(atoms)}")
