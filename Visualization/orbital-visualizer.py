@@ -279,7 +279,12 @@ def parse_gamess_log(filepath):
 
     # --- Atoms / Molecule ---
     symbols = [elements[z].symbol for z in data.atomnos]
-    coords = data.atomcoords[0]  # (natom, 3) in Angstrom
+    # Use last geometry if optimisation (3D array), else single geometry (2D)
+    raw_coords = data.atomcoords
+    if raw_coords.ndim == 3:
+        coords = raw_coords[-1]  # (natom, 3) — final step
+    else:
+        coords = raw_coords        # (natom, 3) — single-point
     atoms = []
     for i in range(data.natom):
         atoms.append(Atom(i, symbols[i], int(data.atomnos[i]),
@@ -317,14 +322,23 @@ def parse_gamess_log(filepath):
 
     # cclib may only return energies for occupied + a few virtual MOs.
     # Pad to full MO count if needed.
-    nmo = mocoeffs_arr.shape[0]
-    if len(moenergies_arr) < nmo:
-        padded = np.full(nmo, np.nan, dtype=np.float64)
+    nmo_full = mocoeffs_arr.shape[0]
+    n_energies = len(moenergies_arr)
+    if n_energies < nmo_full:
+        # GAMESS did not print all virtual MOs — trim to available MOs
+        # (cclib pads remaining rows with zeros)
+        nmo_effective = n_energies
+        mocoeffs_arr = mocoeffs_arr[:nmo_effective, :]
+    else:
+        nmo_effective = nmo_full
+    # Still pad energies in case they're fewer than effective MOs
+    if len(moenergies_arr) < nmo_effective:
+        padded = np.full(nmo_effective, np.nan, dtype=np.float64)
         padded[:len(moenergies_arr)] = moenergies_arr
         moenergies_arr = padded
 
     homo_idx = data.homos[0]  # 0-based (cclib convention for single ref)
-    canon_labels = ['canonical'] * nmo
+    canon_labels = ['canonical'] * nmo_effective
     canon_wfn = Wavefunction(mocoeffs_arr, moenergies_arr, canon_labels)
 
     # --- Localized MOs from raw text ---
