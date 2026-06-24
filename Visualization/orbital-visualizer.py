@@ -829,6 +829,17 @@ def parse_orca_out(filepath):
         col += nc
 
     C_cart = C_sph @ T_s2c  # (nmo, ncart)
+
+    # Normalize MO coefficients using AO overlap matrix S
+    # Ensures C^T S C = 1 for each MO in the non-orthogonal Gaussian basis
+    kdata = _prepare_kernel_data(atoms, basis_set)
+    S = _compute_overlap_matrix(atoms, basis_set, kdata)
+    # Per-MO normalization: C_i /= sqrt(C_i^T S C_i)
+    for i in range(nmo):
+        norm_sq = C_cart[i, :] @ S @ C_cart[i, :]
+        if norm_sq > 1e-15:
+            C_cart[i, :] /= math.sqrt(norm_sq)
+
     canon_wfn = Wavefunction(C_cart, moenergies_arr, ['canonical'] * nmo)
 
     # --- Parse excitation data ---
@@ -922,9 +933,128 @@ def compute_ntos_from_orca_etsecs(homo_idx, mocoeffs_cart, T_ov):
     return holes.T, parts.T, sigma
 
 
-# ---------------------------------------------------------------------------
-# NTO (Natural Transition Orbital) computation from fchk transition densities
-# ---------------------------------------------------------------------------
+def _compute_overlap_matrix(atoms, basis_set, kdata):
+    """Compute the AO overlap matrix S (nbasis × nbasis) analytically.
+
+    Uses Obara-Saika recurrence for Cartesian Gaussian primitives.
+    Includes full normalization (radial + angular + contraction).
+    """
+    (atom_centers, basis_atom_idx, basis_shell_idx,
+     basis_lx, basis_ly, basis_lz, angular_norms,
+     shell_prim_start, shell_L, shell_cutoff_r2,
+     prim_exp, prim_coeff, prim_radial_norm) = kdata
+
+    nbasis = basis_set.nbasis
+    S = np.zeros((nbasis, nbasis), dtype=np.float64)
+
+    for i in range(nbasis):
+        ai = basis_atom_idx[i]
+        si = basis_shell_idx[i]
+        li = (basis_lx[i], basis_ly[i], basis_lz[i])
+        atom_i = atoms[ai]
+        Ai = (atom_i.x, atom_i.y, atom_i.z)
+
+        # Primitive range for basis function i
+        pstart_i = int(shell_prim_start[si])
+        pend_i = int(shell_prim_start[si + 1])
+
+        for j in range(i, nbasis):
+            aj = basis_atom_idx[j]
+            sj = basis_shell_idx[j]
+            lj = (basis_lx[j], basis_ly[j], basis_lz[j])
+            atom_j = atoms[aj]
+            Aj = (atom_j.x, atom_j.y, atom_j.z)
+
+            pstart_j = int(shell_prim_start[sj])
+            pend_j = int(shell_prim_start[sj + 1])
+
+            val = 0.0
+            # Sum over primitive pairs
+            for pi in range(pstart_i, pend_i):
+                ai_exp = prim_exp[pi]
+                ci_contract = prim_coeff[pi]
+                Ni = prim_radial_norm[pi] * angular_norms[i]
+
+                for pj in range(pstart_j, pend_j):
+                    aj_exp = prim_exp[pj]
+                    cj_contract = prim_coeff[pj]
+                    Nj = prim_radial_norm[pj] * angular_norms[j]
+
+                    # 1D overlap in x, y, z
+                    Ix = _overlap_1d(ai_exp, aj_exp, li[0], lj[0], Ai[0], Aj[0])
+                    Iy = _overlap_1d(ai_exp, aj_exp, li[1], lj[1], Ai[1], Aj[1])
+                    Iz = _overlap_1d(ai_exp, aj_exp, li[2], lj[2], Ai[2], Aj[2])
+
+                    val += Ni * Nj * ci_contract * cj_contract * Ix * Iy * Iz
+
+            S[i, j] = val
+            S[j, i] = val
+
+    return S
+
+
+def _overlap_1d(a, b, la, lb, Ax, Bx):
+    """Obara-Saika recurrence for 1D overlap of Cartesian Gaussian primitives.
+
+    Computes ∫ (x-Ax)^la (x-Bx)^lb exp(-a (x-Ax)² - b (x-Bx)²) dx
+    without normalization constants.
+    """
+    p = a + b
+    u = a * b / p
+    Px = (a * Ax + b * Bx) / p
+
+    # Prefactor: sqrt(π/p) * exp(-u * Δx²)
+    S00 = math.sqrt(math.pi / p) * math.exp(-u * (Ax - Bx) ** 2)
+
+    if la == 0 and lb == 0:
+        return S00
+
+    # Allocate recurrence table (la+1 × lb+1), but compute iteratively
+    # to save memory for high angular momentum
+    max_i = la + lb + 1
+    S2d = np.zeros((la + 2, lb + 2), dtype=np.float64)
+    S2d[0, 0] = S00
+
+    PAx = Px - Ax
+    PBx = Px - Bx
+    inv2p = 1.0 / (2.0 * p)
+
+    for i in range(0, la + 1):
+        for j in range(0, lb + 1):
+            if i == 0 and j == 0:
+                continue
+            if i > 0:
+                S2d[i, j] = PAx * S2d[i - 1, j]
+                if i > 1:
+                    S2d[i, j] += (i - 1) * inv2p * S2d[i - 2, j]
+                if j > 0:
+                    S2d[i, j] += j * inv2p * S2d[i - 1, j - 1]
+            else:  # i == 0, j > 0
+                S2d[i, j] = PBx * S2d[i, j - 1]
+                if j > 1:
+                    S2d[i, j] += (j - 1) * inv2p * S2d[i, j - 2]
+                if i > 0:
+                    S2d[i, j] += i * inv2p * S2d[i - 1, j - 1]
+
+    return S2d[la, lb]
+
+
+def _normalize_mo_with_overlap(mocoeffs, S):
+    """Normalize MO coefficients so that C^T S C = I.
+
+    Uses symmetric orthogonalization: C_new = C @ S^{-1/2}.
+    This ensures each MO has unit norm in the non-orthogonal basis.
+    """
+    # Eigenvalue decomposition of S
+    evals, evecs = np.linalg.eigh(S)
+    # Filter small eigenvalues
+    mask = evals > 1e-10
+    evals_inv_sqrt = np.zeros_like(evals)
+    evals_inv_sqrt[mask] = 1.0 / np.sqrt(evals[mask])
+    # S^{-1/2} = V @ diag(1/√λ) @ V^T
+    S_inv_sqrt = evecs @ np.diag(evals_inv_sqrt) @ evecs.T
+    # Normalize MOs
+    return mocoeffs @ S_inv_sqrt
 
 def compute_ntos_from_fchk(filepath, state_idx, canon_wfn, homo_idx, nbasis,
                            mocoeffs_sph=None, T_sph_to_cart=None):
