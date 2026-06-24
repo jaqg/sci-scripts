@@ -917,8 +917,8 @@ def compute_ntos_from_orca_etsecs(homo_idx, mocoeffs_cart, T_ov):
     C_virt = mocoeffs_cart[nocc:, :]
 
     U, sigma, Vt = np.linalg.svd(T_ov, full_matrices=False)
-    holes = U.T @ C_occ
-    parts = Vt @ C_virt
+    holes = C_occ.T @ U     # (ncart, nocc)
+    parts = C_virt.T @ Vt.T  # (ncart, nvirt)
     return holes.T, parts.T, sigma
 
 
@@ -1766,10 +1766,17 @@ class MoleculeSession:
                 T_ov = edata['amplitudes'][s]
                 holes, parts, sigma = compute_ntos_from_orca_etsecs(
                     self.homo_idx, self.canon_wfn.coefficients, T_ov)
+                # Keep only NTOs with non-negligible singular values
+                nkeep = max(1, int(np.sum(sigma > 1e-3)))
+                holes = holes[:nkeep, :]
+                parts = parts[:nkeep, :]
+                sigma = sigma[:nkeep]
                 self.nto_hole_wfns.append(
-                    Wavefunction(holes, np.arange(holes.shape[1], dtype=float), ['nto_hole'] * holes.shape[1]))
+                    Wavefunction(holes, np.arange(nkeep, dtype=float),
+                                 ['nto_hole'] * nkeep))
                 self.nto_part_wfns.append(
-                    Wavefunction(parts, np.arange(parts.shape[1], dtype=float), ['nto_part'] * parts.shape[1]))
+                    Wavefunction(parts, np.arange(nkeep, dtype=float),
+                                 ['nto_part'] * nkeep))
                 self.nto_sigmas.append(sigma)
             return
 
