@@ -2104,7 +2104,7 @@ class MoleculeTab(QWidget):
             self.gallery_tabs.addTab(self.localized_list, "Localized")
 
         # NTO setup (lazy-loaded on first tab access or via state combo)
-        if self.session.filepath.suffix.lower() == '.fchk':
+        if self.session.source in ('gaussian', 'orca'):
             self._setup_nto_panel()
 
     def _set_viewport_count(self, n):
