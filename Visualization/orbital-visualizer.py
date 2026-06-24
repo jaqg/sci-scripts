@@ -778,8 +778,8 @@ def parse_orca_out(filepath):
         coords = coords[-1]
     atomnos = data.atomnos
     symbols = _symbols_from_atomnos(atomnos)
-    atoms = [Atom(i, sym, int(z), x, y, z)
-             for i, (sym, z, (x, y, z)) in enumerate(zip(symbols, atomnos, coords))]
+    atoms = [Atom(i, sym, int(z_num), x, y, z_coord)
+             for i, (sym, z_num, (x, y, z_coord)) in enumerate(zip(symbols, atomnos, coords))]
 
     # --- Build Cartesian BasisSet from cclib gbasis ---
     gbasis = data.gbasis
