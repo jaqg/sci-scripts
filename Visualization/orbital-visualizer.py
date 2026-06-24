@@ -1706,12 +1706,19 @@ class GridWorker(QThread):
     def run(self):
         if self._cancelled:
             return
-        grid_values, origin, spacing = eval_mo_on_grid(
-            self.session.atoms, self.session.basis_set, self.mo_coeffs,
-            grid_spacing=self.grid_spacing
-        )
-        if not self._cancelled:
-            self.finished.emit(grid_values, origin, spacing, self.mo_idx)
+        try:
+            grid_values, origin, spacing = eval_mo_on_grid(
+                self.session.atoms, self.session.basis_set, self.mo_coeffs,
+                grid_spacing=self.grid_spacing
+            )
+            if not self._cancelled:
+                self.finished.emit(grid_values, origin, spacing, self.mo_idx)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            # Don't crash silently — emit empty result so UI doesn't freeze
+            if not self._cancelled:
+                self.finished.emit(None, None, 0.0, self.mo_idx)
 
 
 # ---------------------------------------------------------------------------
@@ -1895,6 +1902,8 @@ class ViewportWidget(QWidget):
     def _on_grid_done(self, grid_values, origin, spacing, mo_idx, generation):
         if generation != self._generation or mo_idx != self.mo_idx:
             return
+        if grid_values is None:
+            return  # computation failed
         self._current_grid_values = grid_values
         self._current_origin = origin
         self._current_spacing = spacing
