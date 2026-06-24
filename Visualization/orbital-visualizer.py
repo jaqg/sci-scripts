@@ -241,7 +241,7 @@ def _read_fchk_array(text, field_name, dtype):
 def _detect_format(filepath):
     """Detect quantum chemistry code from file content.
 
-    Returns 'gamess', 'gaussian', or None if unknown.
+    Returns 'gamess', 'gaussian', 'orca', or None if unknown.
     """
     ext = Path(filepath).suffix.lower()
     if ext == '.fchk':
@@ -257,6 +257,8 @@ def _detect_format(filepath):
             upper = line.upper()
             if 'GAMESS' in upper:
                 return 'gamess'
+            if '* O   R   C   A *' in line:
+                return 'orca'
             if 'GAUSSIAN' in upper or 'ENTERING GAUSSIAN SYSTEM' in upper:
                 return 'gaussian'
             if 'GAUSSIAN, INC' in upper or 'GAUSSIAN INC' in upper:
@@ -752,6 +754,172 @@ def _symbols_from_atomnos(atomnos):
         78: 'Pt', 79: 'Au', 80: 'Hg', 82: 'Pb',
     }
     return [_ATOMIC_SYMBOLS.get(int(z), f'Z{z}') for z in atomnos]
+
+
+# ---------------------------------------------------------------------------
+# ORCA output parsing (via cclib)
+# ---------------------------------------------------------------------------
+
+def parse_orca_out(filepath):
+    """Parse an ORCA .out file. Returns atoms, BasisSet, Wavefunction, NTO data.
+
+    Requires PRINTMOS and PRINTBASIS keywords in the ORCA input.
+    Uses cclib for MO coeffs/basis/energies, custom parser for transition amplitudes.
+    ORCA uses spherical harmonics internally → coefficients transformed to Cartesian.
+    """
+    from cclib.parser import ccopen
+
+    parser = ccopen(str(filepath))
+    data = parser.parse()
+
+    # --- Geometry (final step for optimizations) ---
+    coords = data.atomcoords
+    if coords.ndim == 3:
+        coords = coords[-1]
+    atomnos = data.atomnos
+    symbols = _symbols_from_atomnos(atomnos)
+    atoms = [Atom(i, sym, int(z), x, y, z)
+             for i, (sym, z, (x, y, z)) in enumerate(zip(symbols, atomnos, coords))]
+
+    # --- Build Cartesian BasisSet from cclib gbasis ---
+    gbasis = data.gbasis
+    shells = []
+    shell_is_D_or_F = []
+    n_sph = 0
+    n_cart = 0
+
+    for i_atom in range(data.natom):
+        for ang_str, prims in gbasis[i_atom]:
+            ang_lbl = ang_str.upper()
+            n_cart_this = len(BasisSet.CARTESIAN_MAP.get(ang_lbl, []))
+            if n_cart_this == 0:
+                raise ValueError(f"Unknown angular momentum: {ang_lbl}")
+            n_sph_this = 5 if ang_lbl == 'D' else (7 if ang_lbl == 'F' else n_cart_this)
+            shell_is_D_or_F.append(ang_lbl in ('D', 'F'))
+
+            shells.append(Shell(i_atom, ang_lbl, list(prims)))
+            n_sph += n_sph_this
+            n_cart += n_cart_this
+
+    basis_set = BasisSet(shells, atoms)
+
+    # --- MO energies (cclib stores in eV → convert to Hartree) ---
+    moenergies_arr = np.array(data.moenergies[0], dtype=np.float64) / 27.2114
+    nmo = len(moenergies_arr)
+    homo_idx = data.homos[0]
+
+    # --- MO coefficients (spherical → Cartesian) ---
+    C_sph = data.mocoeffs[0]
+    if C_sph.shape[0] != nmo:
+        C_sph = C_sph.T
+
+    # Build transformation matrix
+    T_s2c = np.zeros((n_sph, n_cart), dtype=np.float64)
+    row, col = 0, 0
+    for sidx, shell in enumerate(shells):
+        lbl = shell.ang_mom
+        if shell_is_D_or_F[sidx]:
+            T_block = _make_shell_transform(lbl)
+            ns, nc = T_block.shape
+        else:
+            ns = nc = len(BasisSet.CARTESIAN_MAP[lbl])
+            T_block = np.eye(ns)
+        T_s2c[row:row + ns, col:col + nc] = T_block
+        row += ns
+        col += nc
+
+    C_cart = C_sph @ T_s2c  # (nmo, ncart)
+    canon_wfn = Wavefunction(C_cart, moenergies_arr, ['canonical'] * nmo)
+
+    # --- Parse excitation data ---
+    etsecs_data = _parse_orca_etsecs(filepath, homo_idx, nmo)
+
+    return (atoms, basis_set, canon_wfn, None, homo_idx,
+            C_sph, T_s2c, etsecs_data)
+
+
+def _parse_orca_etsecs(filepath, homo_idx, nmo):
+    """Parse transition amplitudes from last TD-DFT block in ORCA output."""
+    import re
+
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        text = f.read()
+
+    energies_ha = []
+    symmetries = []
+    amplitudes = []
+
+    for mult_label, sym_label in [('TRIPLETS', 'Triplet'), ('SINGLETS', 'Singlet')]:
+        pattern = 'TD-DFT/TDA EXCITED STATES (' + mult_label + ')'
+        last_pos = text.rfind(pattern)
+        if last_pos < 0:
+            continue
+
+        # Find end of this section (next major header or end of file)
+        end_markers = ['TD-DFT/TDA EXCITED STATES', 'NATURAL TRANSITION',
+                       'TIMING', 'CIS/TD-DFT']
+        end_pos = len(text)
+        for marker in end_markers:
+            pos = text.find(marker, last_pos + len(pattern))
+            if pos > last_pos and pos < end_pos:
+                end_pos = pos
+        block = text[last_pos:end_pos]
+
+        # Parse states in this block only
+        for m in re.finditer(
+            r'STATE\s+(\d+):\s+E=\s+([\d.]+)\s+au.*?(?=STATE\s+\d+:|\Z)',
+            block, re.DOTALL
+        ):
+            state_text = m.group(0)
+            energy_au = float(m.group(2))
+
+            trans_list = []
+            for tline in state_text.split('\n'):
+                tmatch = re.match(
+                    r'\s*(\d+)a\s*->\s*(\d+)a\s*:.*c=\s*([-+]?\d+\.\d+)', tline
+                )
+                if tmatch:
+                    occ = int(tmatch.group(1))     # ORCA uses 0-based indices in output
+                    virt = int(tmatch.group(2))
+                    coeff = float(tmatch.group(3))
+                    trans_list.append((occ, virt, coeff))
+
+            if not trans_list:
+                continue
+
+            nocc = homo_idx + 1
+            nvirt = nmo - nocc
+            T_ov = np.zeros((nocc, nvirt), dtype=np.float64)
+            for occ, virt, coeff in trans_list:
+                if 0 <= occ < nocc and 0 <= (virt - nocc) < nvirt:
+                    T_ov[occ, virt - nocc] = coeff
+
+            energies_ha.append(energy_au)
+            symmetries.append(sym_label)
+            amplitudes.append(T_ov)
+
+    if not amplitudes:
+        return None
+    return {
+        'energies_ha': np.array(energies_ha),
+        'amplitudes': amplitudes,
+        'symmetries': symmetries,
+    }
+
+
+def compute_ntos_from_orca_etsecs(homo_idx, mocoeffs_cart, T_ov):
+    """Compute NTO hole/particle wavefunctions from ORCA transition amplitudes.
+
+    Works directly in MO basis (orthonormal), no metric correction needed.
+    """
+    nocc = homo_idx + 1
+    C_occ = mocoeffs_cart[:nocc, :]
+    C_virt = mocoeffs_cart[nocc:, :]
+
+    U, sigma, Vt = np.linalg.svd(T_ov, full_matrices=False)
+    holes = U.T @ C_occ
+    parts = Vt @ C_virt
+    return holes.T, parts.T, sigma
 
 
 # ---------------------------------------------------------------------------
@@ -1555,10 +1723,12 @@ class MoleculeSession:
     __slots__ = ('atoms', 'basis_set', 'canon_wfn', 'local_wfn',
                  'nto_hole_wfns', 'nto_part_wfns', 'nto_sigmas',
                  'homo_idx', 'filepath', 'bonds', 'nto_state_count',
-                 'mocoeffs_sph', 'T_sph_to_cart')
+                 'mocoeffs_sph', 'T_sph_to_cart', 'source', 'orca_etsecs',
+                 'nto_excitation_energies', 'nto_symmetries')
 
     def __init__(self, atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath,
-                 mocoeffs_sph=None, T_sph_to_cart=None):
+                 mocoeffs_sph=None, T_sph_to_cart=None,
+                 source='gamess', orca_etsecs=None):
         self.atoms = atoms
         self.basis_set = basis_set
         self.canon_wfn = canon_wfn
@@ -1572,11 +1742,38 @@ class MoleculeSession:
         self.nto_state_count = 0
         self.mocoeffs_sph = mocoeffs_sph    # original spherical MO coefficients (nmo, nsph)
         self.T_sph_to_cart = T_sph_to_cart  # (nsph, ncart) transformation matrix
+        self.source = source                # 'gamess', 'gaussian', or 'orca'
+        self.orca_etsecs = orca_etsecs      # etsecs dict from ORCA parser
+        self.nto_excitation_energies = None
+        self.nto_symmetries = None
 
     def ensure_ntos_loaded(self):
-        """Lazy-load NTOs from .fchk file if available."""
+        """Lazy-load NTOs from .fchk or ORCA output if available."""
         if self.nto_hole_wfns is not None:
             return
+
+        # --- ORCA path: compute NTOs from etsecs amplitudes ---
+        if self.source == 'orca' and self.orca_etsecs is not None:
+            edata = self.orca_etsecs
+            nstates = len(edata['amplitudes'])
+            self.nto_state_count = nstates
+            self.nto_excitation_energies = edata.get('energies_ha', None)
+            self.nto_symmetries = edata.get('symmetries', None)
+            self.nto_hole_wfns = []
+            self.nto_part_wfns = []
+            self.nto_sigmas = []
+            for s in range(nstates):
+                T_ov = edata['amplitudes'][s]
+                holes, parts, sigma = compute_ntos_from_orca_etsecs(
+                    self.homo_idx, self.canon_wfn.coefficients, T_ov)
+                self.nto_hole_wfns.append(
+                    Wavefunction(holes, np.arange(holes.shape[1], dtype=float), ['nto_hole'] * holes.shape[1]))
+                self.nto_part_wfns.append(
+                    Wavefunction(parts, np.arange(parts.shape[1], dtype=float), ['nto_part'] * parts.shape[1]))
+                self.nto_sigmas.append(sigma)
+            return
+
+        # --- Gaussian path: .fchk only ---
         ext = self.filepath.suffix.lower()
         if ext != '.fchk':
             self.nto_state_count = 0
@@ -1991,7 +2188,16 @@ class MoleculeTab(QWidget):
             self.nto_state_combo.blockSignals(True)
             self.nto_state_combo.clear()
             for s in range(nc):
-                self.nto_state_combo.addItem(f"State {s+1}")
+                label = f"State {s+1}"
+                if (self.session.nto_excitation_energies is not None
+                        and s < len(self.session.nto_excitation_energies)):
+                    e_ev = self.session.nto_excitation_energies[s] * 27.2114
+                    sym = ''
+                    if (self.session.nto_symmetries is not None
+                            and s < len(self.session.nto_symmetries)):
+                        sym = f" [{self.session.nto_symmetries[s][0]}]"  # T or S
+                    label += f"  {e_ev:.2f} eV{sym}"
+                self.nto_state_combo.addItem(label)
             self.nto_state_combo.blockSignals(False)
             self.nto_panel.setVisible(True)
             self._on_nto_state_changed(0)
@@ -2253,9 +2459,19 @@ class OrbitalViewer(QMainWindow):
             code = _detect_format(filepath)
             if code == 'gamess':
                 atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(filepath)
+                mocoeffs_sph = None
+                T_s2c = None
+                orca_etsecs = None
+                source = 'gamess'
             elif code == 'gaussian':
                 atoms, basis_set, canon_wfn, local_wfn, homo_idx, mocoeffs_sph, T_s2c = \
                     parse_gaussian_fchk(filepath)
+                orca_etsecs = None
+                source = 'gaussian'
+            elif code == 'orca':
+                atoms, basis_set, canon_wfn, local_wfn, homo_idx, mocoeffs_sph, T_s2c, orca_etsecs = \
+                    parse_orca_out(filepath)
+                source = 'orca'
             elif ext == '.chk':
                 QMessageBox.warning(
                     self, "Binary checkpoint",
@@ -2281,7 +2497,7 @@ class OrbitalViewer(QMainWindow):
 
         clear_basis_cache()
         session = MoleculeSession(atoms, basis_set, canon_wfn, local_wfn, homo_idx, filepath,
-                                 mocoeffs_sph, T_s2c)
+                                 mocoeffs_sph, T_s2c, source, orca_etsecs)
         self._sessions.append(session)
 
         tab = MoleculeTab(session)
@@ -2577,13 +2793,15 @@ def cli_main():
         atoms, basis_set, canon_wfn, local_wfn, homo_idx = parse_gamess_log(logpath)
     elif code == 'gaussian':
         atoms, basis_set, canon_wfn, local_wfn, homo_idx, mocoeffs_sph, T_s2c = parse_gaussian_fchk(logpath)
+    elif code == 'orca':
+        atoms, basis_set, canon_wfn, local_wfn, homo_idx, mocoeffs_sph, T_s2c, _ = parse_orca_out(logpath)
     elif logpath.suffix.lower() == '.chk':
         print("Error: binary .chk files cannot be parsed directly.")
         print(f"  Convert first: formchk {logpath.name} {logpath.stem}.fchk")
         sys.exit(1)
     else:
         print(f"Error: could not detect format for '{logpath.name}'.")
-        print("  Supported: GAMESS .log/.out, Gaussian .fchk/.log")
+        print("  Supported: GAMESS .log/.out, Gaussian .fchk/.log, ORCA .out")
         sys.exit(1)
 
     print(f"  Atoms: {len(atoms)}")
