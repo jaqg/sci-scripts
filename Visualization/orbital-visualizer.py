@@ -1893,6 +1893,10 @@ class ViewportWidget(QWidget):
         self._start_compute(wfn.get_mo(mo_idx), grid_spacing, gen)
 
     def _start_compute(self, mo_coeffs, spacing, generation):
+        self._current_grid_values = None  # clear old surface
+        self._current_origin = None
+        self._current_spacing = None
+        self.canvas.clear_orbital()  # visually clear while computing
         self._grid_worker = GridWorker(self.session, mo_coeffs, spacing, self.mo_idx)
         self._grid_worker.finished.connect(
             lambda gv, o, s, mi: self._on_grid_done(gv, o, s, mi, generation))
@@ -1903,6 +1907,8 @@ class ViewportWidget(QWidget):
         if generation != self._generation or mo_idx != self.mo_idx:
             return
         if grid_values is None:
+            self._current_grid_values = None
+            self.canvas.clear_orbital()
             return  # computation failed
         self._current_grid_values = grid_values
         self._current_origin = origin
