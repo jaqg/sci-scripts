@@ -100,6 +100,51 @@ def _sign_flip_grad(grad, dip0_disp, dip0_eq, imax):
     return grad
 
 
+def check_frame_alignment(fchk_a, fchk_b, labels=('refS0', 'refS1'), tol=1e-5):
+    """Abort if two fchk files are not in the same orientation frame.
+
+    Guards the cross-state subtractions Gv = Ges - Ggs and Hv = Hes - Hgs,
+    which are only valid when both files share one Cartesian frame.
+    Gaussian reorients to standard orientation (principal axes) with
+    arbitrary axis signs unless NoSymm is used, so independently generated
+    fchks of the same geometry can differ by a discrete rotation (typically
+    180 deg about a principal axis), silently corrupting the subtracted
+    quantities.
+
+    Pure translations are tolerated: energy, gradient and Hessian are
+    translation-invariant, so refS0/refS1 may sit at different origins.
+    Anything else (rotation, axis swap, or genuinely different geometry)
+    is fatal.
+    """
+    Xa = np.asarray(parse_fchk(fchk_a, 'Current cartesian coordinates'), dtype=float).reshape(-1, 3)
+    Xb = np.asarray(parse_fchk(fchk_b, 'Current cartesian coordinates'), dtype=float).reshape(-1, 3)
+    if Xa.shape != Xb.shape:
+        raise SystemExit(f'FRAME CHECK {labels}: atom-count mismatch '
+                         f'({Xa.shape[0]} vs {Xb.shape[0]} atoms) -- {fchk_a} vs {fchk_b}')
+    ca = Xa - Xa.mean(axis=0)
+    cb = Xb - Xb.mean(axis=0)
+    if np.allclose(ca, cb, atol=tol):
+        return
+    d = ca - cb
+    pat = []
+    for i, ax in enumerate(('x', 'y', 'z')):
+        comp, orig = d[:, i], ca[:, i]
+        if np.allclose(comp, 0, atol=tol):
+            pat.append(ax)
+        elif np.allclose(comp, 2*orig, atol=tol):
+            pat.append('-' + ax)
+        else:
+            pat.append(ax + '?')
+    raise SystemExit(
+        f'FRAME MISMATCH {labels}: coordinates differ beyond translation '
+        f'(max |dx| = {np.abs(d).max():.3e} Bohr, axis pattern [{",".join(pat)}]).\n'
+        f'  A: {fchk_a}\n  B: {fchk_b}\n'
+        'Gaussian standard-orientation frames differ (axis sign ambiguity).\n'
+        'Gv = Ges - Ggs and Hv = Hes - Hgs are invalid across mismatched frames.\n'
+        'Fix: regenerate the offending fchk with NoSymm and the geometry copied '
+        'verbatim (Current cartesian coordinates) from the reference fchk.')
+
+
 def read_etran_from_fchk(fchk_fname, target_state=None):
     """Extract transition dipole moments and their Cartesian gradients from a
     Gaussian fchk file produced by a TD-DFT freq job with iop(7/33=1).
@@ -366,6 +411,7 @@ def compute_eldip_d1num_P(nat, disp_stem_pattern, refS0, fname, delta, dip_dir='
     # Read additional data (energies, gradients and Hessians from S0 and S1 states)
     if refS1 is None:
         refS1 = ref_basename + '.fchk' if ref_basename else disp_stem_pattern + '.fchk'
+    check_frame_alignment(refS0, refS1)
     Egs = parse_fchk(refS0,'Total Energy')
     Ees = parse_fchk(refS1,'Total Energy')
     Ggs = parse_fchk(refS0,'Cartesian Gradient')
@@ -596,6 +642,7 @@ def compute_eldip_d2num_P(nat, disp_stem_pattern, refS0, fname, delta, symmetriz
     # Read additional data (energies, gradients and Hessians from S0 and S1 states)
     if refS1 is None:
         refS1 = ref_basename + '.fchk' if ref_basename else disp_stem_pattern + '.fchk'
+    check_frame_alignment(refS0, refS1)
     Egs = parse_fchk(refS0,'Total Energy')
     Ees = parse_fchk(refS1,'Total Energy')
     Ggs = parse_fchk(refS0,'Cartesian Gradient')
@@ -688,6 +735,7 @@ def compute_eldip_d2num_P_5p(nat, disp_stem_pattern, refS0, fname, delta, symmet
     # Read additional data (energies, gradients and Hessians from S0 and S1 states)
     if refS1 is None:
         refS1 = ref_basename + '.fchk' if ref_basename else disp_stem_pattern + '.fchk'
+    check_frame_alignment(refS0, refS1)
     Egs = parse_fchk(refS0,'Total Energy')
     Ees = parse_fchk(refS1,'Total Energy')
     Ggs = parse_fchk(refS0,'Cartesian Gradient')
