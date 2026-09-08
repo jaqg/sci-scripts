@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-gamess_extract.py — Extract key data from GAMESS .log output files.
+gamess_extract.py — Extract key data from GAMESS output files.
 
 Usage:
     gamess_extract.py file.log                # print summary + write file.xyz
     gamess_extract.py file.log -o out.xyz     # custom XYZ output path
     gamess_extract.py file.log --no-xyz       # skip XYZ file
+    gamess_extract.py file.log --vec          # extract $VEC from .dat to stdout
+    gamess_extract.py file.log --vec -O vec.txt   # write $VEC to file
+    gamess_extract.py file.log --vec --inject target.inp  # inject $VEC into .inp
 
 Extracts:
   - Job metadata: SCF type, run type, functional, basis, charge, multiplicity
@@ -14,6 +17,7 @@ Extracts:
   - SCF convergence: iterations, density converged flag
   - Timing: CPU time, wall clock time
   - Job status: completed / failed / killed
+  - $VEC: MO coefficients from companion .dat (punch) file
 """
 
 import re
@@ -393,6 +397,119 @@ def write_xyz(d: dict, outpath: Path):
 
 
 # ---------------------------------------------------------------------------
+# $VEC extraction from .dat (punch) file
+# ---------------------------------------------------------------------------
+
+def extract_vec_from_dat(dat_path: Path) -> str | None:
+    """Extract the $VEC block from a GAMESS .dat (punch) file.
+
+    Returns the full $VEC ... $END block as a string, or None if not found.
+    """
+    if not dat_path.exists():
+        return None
+
+    text = dat_path.read_text(encoding="utf-8", errors="replace")
+
+    # Count all $VEC occurrences and warn if ambiguous
+    vec_markers = [m for m in re.finditer(r"^\s*\$VEC\s*$", text, re.MULTILINE)]
+    if not vec_markers:
+        return None
+    if len(vec_markers) > 1:
+        print(f"Note: {len(vec_markers)} $VEC blocks found in {dat_path}."
+              f" Typical for opt/IRC/scan runs (one per geometry step)."
+              f" Using last block (final geometry).",
+              file=sys.stderr)
+
+    # Use the LAST $VEC block: for optimizations this is the final geometry's
+    # converged orbitals; for single-point runs there is only one.
+    start_m = vec_markers[-1]
+
+    # Search for the closing $END after the $VEC marker
+    rest = text[start_m.end():]
+    end_m = re.search(r"^\s*\$END\s*$", rest, re.MULTILINE)
+    if not end_m:
+        return None
+
+    # Extract block body (lines between $VEC and $END, excluding delimiters)
+    body = text[start_m.end():start_m.end() + end_m.start()]
+    if not _validate_vec_body(body, dat_path):
+        return None
+
+    block = text[start_m.start():start_m.end() + end_m.end()]
+    return block
+
+
+# Pattern for an orbital coefficient data line: integer, integer, then dense E-notation floats
+_VEC_LINE_RE = re.compile(r"^\s*\d+\s+\d+[-\d]")
+
+
+def _validate_vec_body(body: str, dat_path: Path) -> bool:
+    """Check that the body of a $VEC block contains orbital coefficient data."""
+    stripped = body.strip()
+    if not stripped:
+        print(f"Error: $VEC block in {dat_path} is empty (no orbital data).", file=sys.stderr)
+        return False
+
+    first_line = stripped.splitlines()[0]
+    if not _VEC_LINE_RE.match(first_line):
+        print(f"Error: $VEC block in {dat_path} does not contain recognizable"
+              f" orbital coefficient data. First line: {first_line!r}", file=sys.stderr)
+        return False
+
+    return True
+
+
+def inject_vec_into_inp(inp_path: Path, vec_text: str) -> bool:
+    """Inject $VEC block into a .inp file, replacing the placeholder.
+
+    Looks for the pattern:
+        $VEC
+        -- ... placeholder ... --
+        $END
+    and replaces everything between the $VEC and $END lines with vec_text content.
+
+    Returns True on success, False if placeholder not found.
+    """
+    if not inp_path.exists():
+        print(f"Error: .inp file not found: {inp_path}", file=sys.stderr)
+        return False
+
+    text = inp_path.read_text(encoding="utf-8", errors="replace")
+
+    # Match: $VEC line, then placeholder line(s), then $END line
+    placeholder_re = re.compile(
+        r"(^\s*\$VEC\s*$\n)(.*?)(^\s*\$END\s*$)",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = placeholder_re.search(text)
+    if not m:
+        print("Error: $VEC ... $END placeholder not found in .inp file.", file=sys.stderr)
+        return False
+
+    # Strip the $VEC and $END lines from vec_text — we only want the body
+    vec_body = _strip_vec_envelope(vec_text)
+
+    new_block = f" $VEC\n{vec_body}\n $END"
+    new_text = text[:m.start()] + new_block + text[m.end():]
+
+    inp_path.write_text(new_text, encoding="utf-8")
+    print(f"$VEC injected into: {inp_path}")
+    return True
+
+
+def _strip_vec_envelope(vec_text: str) -> str:
+    """Strip the leading $VEC and trailing $END lines from a $VEC block."""
+    lines = vec_text.splitlines()
+    # Remove leading $VEC line (may have whitespace)
+    if lines and re.match(r"^\s*\$VEC\s*$", lines[0]):
+        lines = lines[1:]
+    # Remove trailing $END line
+    if lines and re.match(r"^\s*\$END\s*$", lines[-1]):
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -414,6 +531,18 @@ def main():
         "--no-xyz", action="store_true",
         help="Skip writing the .xyz file",
     )
+    parser.add_argument(
+        "--vec", action="store_true",
+        help="Extract $VEC (MO coefficients) from companion .dat file",
+    )
+    parser.add_argument(
+        "-O", "--vec-output", metavar="file.txt", default=None,
+        help="Write $VEC to file (default: stdout)",
+    )
+    parser.add_argument(
+        "--inject", metavar="target.inp", default=None,
+        help="Inject $VEC into a .inp file (replaces placeholder between $VEC ... $END)",
+    )
     args = parser.parse_args()
 
     logpath = Path(args.logfile)
@@ -427,6 +556,23 @@ def main():
     if not args.no_xyz:
         xyzpath = Path(args.output) if args.output else logpath.with_suffix(".xyz")
         write_xyz(data, xyzpath)
+
+    # -- $VEC extraction --
+    if args.vec:
+        dat_path = logpath.with_suffix(".dat")
+        vec_text = extract_vec_from_dat(dat_path)
+        if vec_text is None:
+            sys.exit(f"Error: $VEC not found in {dat_path} (file missing or no $VEC block)")
+
+        if args.inject:
+            inject_vec_into_inp(Path(args.inject), vec_text)
+
+        if args.vec_output:
+            Path(args.vec_output).write_text(vec_text, encoding="utf-8")
+            print(f"$VEC written to: {args.vec_output}")
+        elif not args.inject:
+            # Print to stdout (when not also injecting, to avoid double output)
+            print(vec_text)
 
 
 if __name__ == "__main__":
