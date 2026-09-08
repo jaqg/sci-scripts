@@ -16,6 +16,9 @@ Options:
     -u  / --user        Remote username (default: user already in --host, or SSH config)
     -e  / --exclude     Exclude pattern (can be used multiple times)
                         e.g. -e '*.txt' -e 'dir/'
+    -of / --only-files  Only sync files matching pattern (can be used multiple times)
+                        e.g. -of '*.txt' -of 'data/*.csv'
+                        (equivalent to excluding everything else)
     --dry-run           Show what would be transferred without doing it
     --delete            Delete files on the destination that are absent on the source
     --skip-empty-dirs   Skip empty directories (passes --prune-empty-dirs to rsync)
@@ -27,7 +30,7 @@ import subprocess
 import sys
 
 
-def sync(src, dst, *, dry_run=False, delete=False, exclude=None, skip_empty_dirs=False):
+def sync(src, dst, *, dry_run=False, delete=False, exclude=None, only_files=None, skip_empty_dirs=False):
     cmd = ["rsync", "-avz", "--progress"]
     if dry_run:
         cmd.append("--dry-run")
@@ -35,8 +38,14 @@ def sync(src, dst, *, dry_run=False, delete=False, exclude=None, skip_empty_dirs
         cmd.append("--delete")
     if skip_empty_dirs:
         cmd.append("--prune-empty-dirs")
+    # First-match-wins: specific excludes beat the broad include/exclude below
     for pattern in (exclude or []):
         cmd += ["--exclude", pattern]
+    if only_files:
+        cmd += ["--include", "*/"]  # keep recursing into directories
+        for pattern in only_files:
+            cmd += ["--include", pattern]
+        cmd += ["--exclude", "*"]   # drop everything not included
     # Trailing slash on src means "contents of dir", not "dir itself"
     cmd += [src.rstrip("/") + "/", dst.rstrip("/") + "/"]
     print("  $", " ".join(cmd))
@@ -68,6 +77,8 @@ def main():
 
     parser.add_argument("-e", "--exclude", action="append", default=[], metavar="PATTERN",
                         help="Exclude pattern, e.g. '*.txt' or 'dir/' (repeatable)")
+    parser.add_argument("-of", "--only-files", action="append", default=[], metavar="PATTERN",
+                        help="Only sync files matching PATTERN, e.g. '*.txt' (repeatable)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be transferred without doing it")
     parser.add_argument("--delete", action="store_true",
@@ -92,10 +103,10 @@ def main():
 
     if args.upload:
         print(f"Uploading  {args.local_dir}/ → {remote}/")
-        sync(args.local_dir, remote, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude, skip_empty_dirs=args.skip_empty_dirs)
+        sync(args.local_dir, remote, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude, only_files=args.only_files, skip_empty_dirs=args.skip_empty_dirs)
     else:
         print(f"Downloading {remote}/ → {args.local_dir}/")
-        sync(remote, args.local_dir, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude, skip_empty_dirs=args.skip_empty_dirs)
+        sync(remote, args.local_dir, dry_run=args.dry_run, delete=args.delete, exclude=args.exclude, only_files=args.only_files, skip_empty_dirs=args.skip_empty_dirs)
 
 
 if __name__ == "__main__":
