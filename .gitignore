@@ -22,3 +22,5 @@ Thumbs.db
 # Large Gaussian checkpoint files
 *.chk
 *.fchk
+Blender/beautiful-atoms/
+Blender/molecular-blender/

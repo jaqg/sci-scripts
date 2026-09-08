@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "camera": {
+    "ortho": true,
+    "distance_factor": 2.0
+  },
+  "lighting": {
+    "key_intensity": 100.0,
+    "fill_intensity": 50.0,
+    "rim_intensity": 80.0
+  },
+  "render": {
+    "engine": "CYCLES",
+    "samples": 300,
+    "resolution_x": 1920,
+    "resolution_y": 1080,
+    "transparent": true
+  },
+  "orbitals": {
+    "default_isovalue": 0.05,
+    "positive_color": [1.0, 0.2, 0.2],
+    "negative_color": [0.2, 0.4, 1.0],
+    "alpha": 0.6,
+    "material_style": "default",
+    "subdivision": false
+  },
+  "molecule": {
+    "show_atoms": true,
+    "show_bonds": true
+  }
+}
