@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# orca-tda-table — Extract TDDFT/TDA excitation data from ORCA .out file
+# Output: TSV with header to stdout
+#
+# Usage:
+#   orca-tda-table [--last-only] [--mult triplet|singlet|both] FILE.out
+#
+# Extract state number, excitation energies (au, eV, cm⁻¹), S², and
+# dominant orbital contributions from ORCA TDDFT/TDA output.
+
+set -euo pipefail
+
+LAST_ONLY=false
+MULT="both"
+OUTFILE=""
+
+usage() {
+  sed 's/^  //' <<'EOF'
+  Usage: orca-tda-table [--last-only] [--mult triplet|singlet|both] FILE.out
+
+  Extract excitation energies and dominant orbital contributions from
+  ORCA TDDFT/TDA output. Outputs TSV to stdout.
+
+  Options:
+    --last-only    Only the final geometry optimization step
+    --mult MULT    Multiplicity: triplet, singlet, or both (default)
+EOF
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --last-only) LAST_ONLY=true; shift ;;
+    --mult) MULT="$2"; shift 2 ;;
+    --help|-h) usage ;;
+    -*) echo "Unknown option: $1"; usage;;
+    *) OUTFILE="$1"; shift ;;
+  esac
+done
+
+[[ -n "${OUTFILE:-}" ]] || usage
+[[ -f "$OUTFILE" ]] || { echo "ERROR: file not found: $OUTFILE" >&2; exit 1; }
+
+# -- Determine which sections to process ------------------------------------
+SECTION_PATTERN='TD-DFT\/TDA EXCITED STATES'
+
+if $LAST_ONLY; then
+  # Find line number of last occurrence
+  LAST_LN=$(grep -n "$SECTION_PATTERN" "$OUTFILE" | tail -1 | cut -d: -f1)
+  if [[ -z "$LAST_LN" ]]; then
+    echo "ERROR: no excitation sections found" >&2
+    exit 1
+  fi
+  # Extract from that line to end of file
+  TAIL_TEXT=$(tail -n +"$LAST_LN" "$OUTFILE")
+else
+  TAIL_TEXT=$(cat "$OUTFILE")
+fi
+
+# -- Parse with awk ---------------------------------------------------------
+echo "$TAIL_TEXT" | awk -v mult="$MULT" '
+BEGIN {
+  OFS = "\t"
+  print "state", "E_au", "eV", "cm-1", "S2", "dominant_contribs"
+  in_section = 0
+  section_mult = ""
+  state_n = e_au = ev = wavenum = s2 = ""
+  contrib_count = 0
+  delete contribs
+}
+
+# Track which section we are in
+/^TD-DFT\/TDA EXCITED STATES/ {
+  # Flush any pending state before switching sections
+  if (state_n != "") flush_state()
+  
+  in_section = 1
+  if ($0 ~ /TRIPLETS/) section_mult = "triplet"
+  else if ($0 ~ /SINGLETS/) section_mult = "singlet"
+  else section_mult = "both"
+  next
+}
+
+# Exit section when we hit section boundary markers
+in_section && /^(FINAL SINGLE|CARTESIAN GRADIENT|SCF CONVERGED|GEOMETRY OPTIMIZATION|HURRAY|\*\*\*\*ORCA)/ {
+  if (state_n != "") flush_state()
+  in_section = 0
+  next
+}
+
+{ if (!in_section) next }
+
+# State line
+/^STATE\s+[0-9]+:/ {
+  if (state_n != "") flush_state()
+  
+  match($0, /STATE\s+([0-9]+):/, m);  state_n = m[1]
+  match($0, /E=\s+(\S+)\s+au/, m);    e_au = m[1]
+  match($0, /(\S+)\s+eV/, m);         ev = m[1]
+  match($0, /(\S+)\s+cm\*\*-1/, m);  wavenum = m[1]
+  match($0, /<S\*\*2>\s*=\s*(\S+)/, m); s2 = m[1]
+  
+  contrib_count = 0
+  delete contribs
+  next
+}
+
+# Orbital contribution
+/^\s+[0-9]+a\s*->\s*[0-9]+a\s*:/ {
+  if (state_n == "") next
+  if (contrib_count >= 3) next
+  
+  match($0, /([0-9]+a\s*->\s*[0-9]+a)/, m)
+  orb = m[1]; gsub(/\s+/, "", orb)
+  
+  match($0, /:\s+(\S+)\s*\(/, m)
+  weight = m[1]
+  
+  contribs[contrib_count] = "[" orb "] " weight
+  contrib_count++
+  next
+}
+
+function flush_state(    s, i) {
+  if (state_n == "") return
+  if (mult != "both" && section_mult != mult) { state_n = ""; return }
+  
+  s = ""
+  for (i = 0; i < contrib_count; i++) {
+    if (i > 0) s = s "; "
+    s = s contribs[i]
+  }
+  
+  print state_n, e_au, ev, wavenum, s2, s
+  state_n = ""
+}
+
+END {
+  if (state_n != "") flush_state()
+}
+'

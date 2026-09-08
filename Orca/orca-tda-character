@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""
+orca-tda-character — Quantify hole/particle fragment character for each TDA state.
+
+Usage:
+  # Step 1: Generate MO fragment populations
+  orca-mo-fragment file.molden --fragments "NH2:11-13;NO2:14-16;ring:1-10;BH3:17-20" > mo_frags.tsv
+
+  # Step 2: Generate TDA table
+  orca-tda-table file.out --last-only --mult triplet > tda.tsv
+
+  # Step 3: Combine
+  orca-tda-character tda.tsv mo_frags.tsv
+
+Output: TSV with columns:
+  State  Exc(eV)  hole_NH2%  hole_NO2%  hole_ring%  hole_BH3%
+         particle_NH2%  particle_NO2%  particle_ring%  particle_BH3%
+
+Also computes a "target score":
+  score = hole_NH2% * (100 - particle_NO2%) / 10000
+  (max when hole on NH2 and particle NOT on NO2)
+"""
+
+import sys
+import argparse
+import re
+
+
+def parse_tda_table(path):
+    """Parse TSV from orca-tda-table. Returns list of dicts."""
+    states = []
+    with open(path) as f:
+        header = f.readline().strip().split('\t')
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) < 6:
+                continue
+            state = {
+                'state': int(parts[0]),
+                'e_au': float(parts[1]),
+                'ev': float(parts[2]),
+                'wavenum': float(parts[3]),
+                's2': float(parts[4]),
+                'contribs_raw': parts[5]
+            }
+            # Parse orbital contributions: "[39a->40a] 0.878565; [39a->48a] 0.094381"
+            contribs = {}
+            for chunk in parts[5].split(';'):
+                chunk = chunk.strip()
+                m = re.match(r'\[(\d+)a->(\d+)a\]\s+([0-9.]+)', chunk)
+                if m:
+                    occ = int(m.group(1))
+                    virt = int(m.group(2))
+                    weight = float(m.group(3))
+                    contribs[(occ, virt)] = weight
+            state['contribs'] = contribs
+            states.append(state)
+    return states
+
+
+def parse_mo_frags(path):
+    """Parse TSV from orca-mo-fragment. Returns dict: mo_idx -> {frag -> pct}."""
+    mo_data = {}
+    with open(path) as f:
+        header = f.readline().strip().split('\t')
+        # Find fragment columns (those ending with % and not MO/Ene/Occ/Spin)
+        frag_cols = []
+        for i, col in enumerate(header):
+            if col.endswith('%') and col not in ('MO', 'Ene(eV)', 'Occ', 'Spin'):
+                frag_cols.append((i, col[:-1]))  # (col_index, frag_name)
+
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) < len(header):
+                continue
+            mo_idx = int(parts[0])
+            frag_pcts = {}
+            for col_idx, frag_name in frag_cols:
+                if col_idx < len(parts):
+                    frag_pcts[frag_name] = float(parts[col_idx])
+            mo_data[mo_idx] = frag_pcts
+    return mo_data
+
+
+def compute_character(states, mo_data):
+    """For each state, compute weighted hole/particle fragment populations."""
+    
+    # Collect all fragment names
+    all_frags = set()
+    for mo in mo_data.values():
+        all_frags.update(mo.keys())
+    all_frags = sorted(all_frags)
+    
+    results = []
+    for state in states:
+        hole = {f: 0.0 for f in all_frags}
+        particle = {f: 0.0 for f in all_frags}
+        total_weight = 0.0
+
+        for (occ, virt), weight in state['contribs'].items():
+            total_weight += abs(weight)
+
+            # Hole = occupied MO population
+            if occ in mo_data:
+                for f in all_frags:
+                    hole[f] += abs(weight) * mo_data[occ].get(f, 0.0)
+
+            # Particle = virtual MO population
+            if virt in mo_data:
+                for f in all_frags:
+                    particle[f] += abs(weight) * mo_data[virt].get(f, 0.0)
+
+        # Normalize
+        if total_weight > 0:
+            for f in all_frags:
+                hole[f] /= total_weight
+                particle[f] /= total_weight
+
+        # Compute target score: hole on NH2, particle NOT on NO2
+        nh2_hole = hole.get('NH2', 0.0)
+        no2_particle = particle.get('NO2', 0.0)
+        score = (nh2_hole * (100.0 - no2_particle)) / 10000.0  # 0 to 1 scale
+
+        results.append({
+            'state': state['state'],
+            'ev': state['ev'],
+            'hole': hole,
+            'particle': particle,
+            'score': score
+        })
+
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Quantify hole/particle fragment character for TDA states')
+    parser.add_argument('tda_file', help='TSV from orca-tda-table')
+    parser.add_argument('mo_frags_file', help='TSV from orca-mo-fragment')
+    parser.add_argument('--sort-by', default='score',
+                       choices=['score', 'ev', 'state', 'hole_NH2', 'particle_NO2'],
+                       help='Sort output by this column')
+    args = parser.parse_args()
+
+    states = parse_tda_table(args.tda_file)
+    mo_data = parse_mo_frags(args.mo_frags_file)
+
+    if not states:
+        print("ERROR: no TDA states found", file=sys.stderr)
+        sys.exit(1)
+    if not mo_data:
+        print("ERROR: no MO fragment data found", file=sys.stderr)
+        sys.exit(1)
+
+    results = compute_character(states, mo_data)
+
+    # Get fragment names
+    all_frags = sorted(results[0]['hole'].keys()) if results else []
+
+    # Header
+    header = ['State', 'Exc(eV)', 'Score']
+    for f in all_frags:
+        header.append(f'hole_{f}%')
+    for f in all_frags:
+        header.append(f'particle_{f}%')
+    print('\t'.join(header))
+
+    # Sort
+    if args.sort_by == 'score':
+        results.sort(key=lambda r: -r['score'])
+    elif args.sort_by == 'ev':
+        results.sort(key=lambda r: r['ev'])
+    elif args.sort_by == 'state':
+        results.sort(key=lambda r: r['state'])
+    elif args.sort_by == 'hole_NH2':
+        results.sort(key=lambda r: -r['hole'].get('NH2', 0))
+    elif args.sort_by == 'particle_NO2':
+        results.sort(key=lambda r: r['particle'].get('NO2', 0))
+
+    for r in results:
+        row = [str(r['state']), f'{r["ev"]:.3f}', f'{r["score"]:.4f}']
+        for f in all_frags:
+            row.append(f'{r["hole"].get(f, 0.0):.1f}')
+        for f in all_frags:
+            row.append(f'{r["particle"].get(f, 0.0):.1f}')
+        print('\t'.join(row))
+
+    # Print interpretation
+    print(file=sys.stderr)
+    print("Score = hole_NH2% × (100 − particle_NO2%) / 10000", file=sys.stderr)
+    print("Higher score = more NH2 character in hole, less NO2 in particle", file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

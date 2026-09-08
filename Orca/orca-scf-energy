@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# orca-scf-energy — Extract SCF and TDA total energies from ORCA .out
+# Output: TSV with header
+#
+# Usage:
+#   orca-scf-energy [--last-only] FILE.out
+
+set -euo pipefail
+
+LAST_ONLY=false
+OUTFILE=""
+
+usage() {
+  sed 's/^  //' <<'EOF'
+  Usage: orca-scf-energy [--last-only] FILE.out
+
+  Extract SCF energy (Total Energy) and TDA final single-point energy
+  for each geometry optimization step. Outputs TSV to stdout.
+
+  Options:
+    --last-only    Only the final geometry optimization step
+EOF
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --last-only) LAST_ONLY=true; shift ;;
+    --help|-h) usage ;;
+    -*) echo "Unknown option: $1"; usage ;;
+    *) OUTFILE="$1"; shift ;;
+  esac
+done
+
+[[ -n "${OUTFILE:-}" ]] || usage
+[[ -f "$OUTFILE" ]] || { echo "ERROR: file not found: $OUTFILE" >&2; exit 1; }
+
+# awk program
+awk -v last_only="$LAST_ONLY" '
+BEGIN {
+  OFS = "\t"
+  if (!last_only) print "step", "E_SCF", "E_TDA_total"
+  step = 0
+  scf_energy = ""
+  tda_energy = ""
+}
+
+# SCF converged: grab total energy
+/SCF CONVERGED/ {
+  in_scf_block = 1
+  step++
+  next
+}
+
+in_scf_block && /Total Energy\s*:/ {
+  match($0, /Total Energy\s*:\s+(\S+)/, m)
+  scf_energy = m[1]
+  in_scf_block = 0
+}
+
+# TDA final energy
+/FINAL SINGLE POINT ENERGY/ {
+  match($0, /FINAL SINGLE POINT ENERGY\s+(\S+)/, m)
+  tda_energy = m[1]
+  
+  if (last_only) {
+    # buffer, only print on last
+    last_scf = scf_energy
+    last_tda = tda_energy
+  } else {
+    print step, scf_energy, tda_energy
+  }
+}
+
+END {
+  if (last_only) {
+    print step, last_scf, last_tda
+  }
+}
+' "$OUTFILE"

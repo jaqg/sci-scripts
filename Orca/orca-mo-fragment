@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""
+orca-mo-fragment — Compute per-fragment population for each MO from Molden file.
+
+Usage:
+  orca-mo-fragment file.molden --fragments "NH2:11-13;NO2:14-16;ring:1-10;BH3:17-20"
+  orca-mo-fragment file.molden --fragments "NH2:11,12,13;NO2:14,15,16;ring:1-10;BH3:17-20"
+
+Output: TSV to stdout with columns:
+  MO  Ene(eV)  Occ  <frag1>%  <frag2>%  ...  description
+"""
+
+import sys
+import argparse
+import re
+
+# -- helpers ------------------------------------------------------------------
+SHELL_FUNCS = {'s': 1, 'p': 3, 'd': 5, 'f': 7, 'g': 9, 'h': 11}
+
+class MoldenParser:
+    def __init__(self, path):
+        self.path = path
+        self.atom_ranges = {}   # atom -> (start, end) 1-indexed inclusive
+        self.mo_data = []       # list of {idx, ene, occ, coeffs: []}
+        self._parse()
+
+    def _parse(self):
+        with open(self.path) as f:
+            lines = f.readlines()
+
+        # Phase 1: Atom basis ranges from [GTO]
+        in_gto = False
+        current_bf = 1
+        current_atom = 0
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if '[GTO]' in line:
+                in_gto = True
+                i += 1
+                continue
+            if '[MO]' in line:
+                break
+            if not in_gto:
+                i += 1
+                continue
+
+            parts = line.split()
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                current_atom = int(parts[0])
+                self.atom_ranges[current_atom] = [current_bf, 0]
+                i += 1
+                continue
+            if parts and parts[0] in SHELL_FUNCS:
+                nf = SHELL_FUNCS[parts[0]]
+                current_bf += nf
+                # Skip primitive lines
+                nprim = int(parts[1])
+                for _ in range(nprim):
+                    i += 1
+                    if i >= len(lines): break
+                i += 1
+                continue
+            i += 1
+
+        # Finalize atom ranges
+        for atom in self.atom_ranges:
+            start = self.atom_ranges[atom][0]
+            self.atom_ranges[atom] = (start, current_bf - 1 if atom == max(self.atom_ranges) else 0)
+        # Fill end for each atom
+        sorted_atoms = sorted(self.atom_ranges.keys())
+        for idx, atom in enumerate(sorted_atoms):
+            start = self.atom_ranges[atom][0]
+            if idx + 1 < len(sorted_atoms):
+                end = self.atom_ranges[sorted_atoms[idx + 1]][0] - 1
+            else:
+                end = current_bf - 1
+            self.atom_ranges[atom] = (start, end)
+
+        # Phase 2: MO coefficients from [MO]
+        in_mo = False
+        current_mo = None
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if '[MO]' in line:
+                in_mo = True
+                i += 1
+                continue
+            if not in_mo:
+                i += 1
+                continue
+
+            if line.startswith('Sym='):
+                if current_mo and current_mo['coeffs']:
+                    self.mo_data.append(current_mo)
+                current_mo = {'idx': len(self.mo_data) + 1,
+                             'sym': line.split('=')[1].strip(),
+                             'ene': 0.0,
+                             'spin': '',
+                             'occ': 0.0,
+                             'coeffs': {}}
+                i += 1
+                continue
+            if line.startswith('Ene='):
+                if current_mo:
+                    current_mo['ene'] = float(line.split('=')[1].strip())
+                i += 1
+                continue
+            if line.startswith('Spin='):
+                if current_mo:
+                    current_mo['spin'] = line.split('=')[1].strip()
+                i += 1
+                continue
+            if line.startswith('Occup='):
+                if current_mo:
+                    current_mo['occ'] = float(line.split('=')[1].strip())
+                i += 1
+                continue
+
+            # Coefficient line: "  <idx>  <value>"
+            parts = line.split()
+            if len(parts) == 2 and current_mo:
+                try:
+                    idx = int(parts[0])
+                    val = float(parts[1])
+                    current_mo['coeffs'][idx] = val
+                except (ValueError, IndexError):
+                    pass
+            i += 1
+
+        # Don't forget last MO
+        if current_mo and current_mo['coeffs']:
+            self.mo_data.append(current_mo)
+
+    def total_basis(self):
+        starts = {a: r[0] for a, r in self.atom_ranges.items()}
+        ends = {a: r[1] for a, r in self.atom_ranges.items()}
+        if ends:
+            return max(ends.values())
+        return 0
+
+    def atom_for_bf(self, bf_idx):
+        for atom, (start, end) in self.atom_ranges.items():
+            if start <= bf_idx <= end:
+                return atom
+        return None
+
+
+def parse_fragments(frag_str):
+    """Parse 'NH2:11-13;NO2:14,15,16;ring:1-10;BH3:17-20' """
+    fragments = {}
+    for part in frag_str.split(';'):
+        part = part.strip()
+        if not part or ':' not in part:
+            continue
+        name, atoms_str = part.split(':', 1)
+        name = name.strip()
+        atoms = set()
+        for chunk in atoms_str.split(','):
+            chunk = chunk.strip()
+            if '-' in chunk:
+                lo, hi = chunk.split('-', 1)
+                atoms.update(range(int(lo), int(hi) + 1))
+            else:
+                atoms.add(int(chunk))
+        fragments[name] = atoms
+    return fragments
+
+
+def compute_fragment_populations(molden, fragments):
+    """For each MO, compute sum|c|^2 per fragment."""
+    # Build atom->fragment mapping
+    atom_to_frag = {}
+    for frag_name, atoms in fragments.items():
+        for a in atoms:
+            atom_to_frag[a] = frag_name
+
+    results = []
+    for mo in molden.mo_data:
+        # Sum squared coefficients per fragment
+        frag_sums = {f: 0.0 for f in fragments}
+        total_sum = 0.0
+
+        for bf_idx, coeff in mo['coeffs'].items():
+            atom = molden.atom_for_bf(bf_idx)
+            if atom is None:
+                continue
+            frag = atom_to_frag.get(atom)
+            sq = coeff * coeff
+            total_sum += sq
+            if frag:
+                frag_sums[frag] += sq
+
+        # Normalize to percentages
+        frag_pct = {}
+        for f, s in frag_sums.items():
+            frag_pct[f] = (s / total_sum * 100) if total_sum > 0 else 0.0
+
+        results.append({
+            'mo': mo['idx'],
+            'ene': mo['ene'],
+            'occ': mo['occ'],
+            'spin': mo['spin'],
+            'sym': mo['sym'],
+            'populations': frag_pct,
+            'total_norm': total_sum
+        })
+
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Compute per-fragment MO populations from ORCA Molden file')
+    parser.add_argument('molden_file', help='ORCA .molden.input file')
+    parser.add_argument('--fragments', required=True,
+                       help='Fragment definitions: "NH2:11-13;NO2:14-16;ring:1-10;BH3:17-20"')
+    parser.add_argument('--occ-only', action='store_true', help='Only show occupied MOs')
+    parser.add_argument('--virt-only', action='store_true', help='Only show virtual MOs')
+    parser.add_argument('--top', type=int, default=0, help='Show only top N MOs per fragment')
+    args = parser.parse_args()
+
+    fragments = parse_fragments(args.fragments)
+    if not fragments:
+        print("ERROR: no valid fragments parsed", file=sys.stderr)
+        sys.exit(1)
+
+    molden = MoldenParser(args.molden_file)
+    if not molden.mo_data:
+        print("ERROR: no MO data found", file=sys.stderr)
+        sys.exit(1)
+
+    results = compute_fragment_populations(molden, fragments)
+
+    # Filter
+    if args.occ_only:
+        results = [r for r in results if r['occ'] > 0.5]
+    if args.virt_only:
+        results = [r for r in results if r['occ'] < 0.5]
+
+    # Header
+    frag_names = list(fragments.keys())
+    header = ['MO', 'Ene(eV)', 'Occ', 'Spin'] + [f'{f}%' for f in frag_names]
+    print('\t'.join(header))
+
+    for r in results:
+        ene_ev = r['ene'] * 27.2114  # Hartree to eV
+        row = [str(r['mo']), f'{ene_ev:.4f}', f'{r["occ"]:.4f}', r['spin']]
+        for f in frag_names:
+            row.append(f'{r["populations"].get(f, 0.0):.1f}')
+        print('\t'.join(row))
+
+
+if __name__ == '__main__':
+    main()

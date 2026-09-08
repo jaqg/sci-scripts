@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# orca-opt-converged — Check if ORCA geometry optimization converged
+# Exit code: 0 = converged, 1 = not converged, 2 = error/broken
+#
+# Usage:
+#   orca-opt-converged FILE.out
+#   orca-opt-converged --verbose FILE.out
+
+set -euo pipefail
+
+VERBOSE=false
+OUTFILE=""
+
+usage() {
+  sed 's/^  //' <<'EOF'
+  Usage: orca-opt-converged [--verbose] FILE.out
+
+  Check if an ORCA geometry optimization converged.
+  
+  Exit codes:
+    0   Converged (stationary point found)
+    1   Not converged (max steps reached, still running, or no optimization)
+    2   File error or .out missing/corrupted
+
+  Options:
+    --verbose    Print convergence details to stdout
+EOF
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --verbose) VERBOSE=true; shift ;;
+    --help|-h) usage ;;
+    -*) echo "Unknown option: $1"; usage ;;
+    *) OUTFILE="$1"; shift ;;
+  esac
+done
+
+[[ -n "${OUTFILE:-}" ]] || usage
+[[ -f "$OUTFILE" ]] || { echo "ERROR: file not found: $OUTFILE" >&2; exit 2; }
+
+# Check convergence
+if grep -q 'THE OPTIMIZATION HAS CONVERGED' "$OUTFILE"; then
+  $VERBOSE && echo "CONVERGED"
+  
+  # Extract final stats
+  if $VERBOSE; then
+    STEPS=$(grep -c 'SCF CONVERGED' "$OUTFILE" || echo "?")
+    LAST_SCF=$(grep 'Total Energy' "$OUTFILE" | tail -1 | awk '{print $4}')
+    LAST_TDA=$(grep 'FINAL SINGLE POINT ENERGY' "$OUTFILE" | tail -1 | awk '{print $NF}')
+    echo "  Geometry steps: $STEPS"
+    echo "  Final SCF:      $LAST_SCF Eh"
+    echo "  Final TDA:      $LAST_TDA Eh"
+  fi
+  exit 0
+fi
+
+# Check if terminated normally but didn't converge
+if grep -q 'ORCA TERMINATED NORMALLY' "$OUTFILE"; then
+  STEPS=$(grep -c 'SCF CONVERGED' "$OUTFILE" || echo "?")
+  $VERBOSE && echo "NOT CONVERGED (terminated normally after $STEPS steps)"
+  exit 1
+fi
+
+# Check if still running or crashed
+$VERBOSE && echo "NOT CONVERGED (running, crashed, or incomplete)"
+exit 1
