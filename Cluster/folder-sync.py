@@ -77,8 +77,9 @@ def main():
 
     parser.add_argument("-e", "--exclude", action="append", default=[], metavar="PATTERN",
                         help="Exclude pattern, e.g. '*.txt' or 'dir/' (repeatable)")
-    parser.add_argument("-of", "--only-files", action="append", default=[], metavar="PATTERN",
-                        help="Only sync files matching PATTERN, e.g. '*.txt' (repeatable)")
+    parser.add_argument("-of", "--only-files", action="append", nargs="+", default=[], metavar="PATTERN",
+                        help="Only sync files matching PATTERN, e.g. '-of a.sh b.sh' or "
+                             "'-of *.inp' (repeatable)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be transferred without doing it")
     parser.add_argument("--delete", action="store_true",
@@ -86,6 +87,8 @@ def main():
     parser.add_argument("--skip-empty-dirs", action="store_true",
                         help="Skip empty directories (passes --prune-empty-dirs to rsync)")
     args = parser.parse_args()
+    # --only-files uses append+nargs='+': flatten [[a,b],[c]] → [a,b,c]
+    args.only_files = [p for group in args.only_files for p in group]
 
     # Build remote target: if -u given, prepend user@ (stripping any existing user@ from --host)
     host = args.host.split("@")[-1] if args.user else args.host
